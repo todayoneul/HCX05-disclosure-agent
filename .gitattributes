@@ -1,0 +1,11 @@
+pipeline/out/chunks.jsonl filter=lfs diff=lfs merge=lfs -text
+pipeline/out/events.db filter=lfs diff=lfs merge=lfs -text
+eval/cases/*.jsonl text eol=lf
+eval/cases/manifest.json text eol=lf
+eval/review/evidence_review.csv text eol=lf
+eval/reviewed/current.json text eol=lf
+eval/reviewed/releases/*/*.json text eol=lf
+eval/reviewed/releases/*/*.jsonl text eol=lf
+eval/reviewed/releases/*/*.csv text eol=lf
+reports/eval/retrieval-baseline-v1/current.json text eol=lf
+reports/eval/retrieval-baseline-v1/releases/*/*.json text eol=lf

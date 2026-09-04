@@ -1,0 +1,60 @@
+{"case_id":"dev-retrieval-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-002","notes":"보일러플레이트(분기/반기 미기재 안내문)라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"dev-retrieval-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-004","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-005","notes":"보일러플레이트라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"dev-retrieval-006","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-007","notes":"보일러플레이트(반기 미기재 안내문)라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"dev-retrieval-008","notes":"보일러플레이트라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"dev-retrieval-009","notes":"보일러플레이트라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"dev-retrieval-010","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-011","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-retrieval-012","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-004","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-005","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-006","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-007","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-008","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-009","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-010","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-011","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-compare-012","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-002","notes":"2차 정정 존재, 정식 검증에서 확인","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-004","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-005","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-006","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-007","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-008","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-009","notes":"2차 정정 존재, 정식 검증에서 확인","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-010","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-011","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-history-012","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-003","notes":"2차 정정 존재, 정식 검증에서 확인","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-004","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-005","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-correction-006","notes":"2차 정정 존재, 정식 검증에서 확인","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-info-limit-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-info-limit-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-info-limit-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-safety-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-safety-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"dev-safety-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-retrieval-001","notes":"보일러플레이트(분기보고서 미기재 안내문)라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"reg-retrieval-002","notes":"보일러플레이트(분기보고서 미기재 안내문)라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"reg-retrieval-003","notes":"보일러플레이트(분기보고서 미기재 안내문)라 실질 추출 검증 부적합","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"rejected"}
+{"case_id":"reg-compare-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-compare-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-compare-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-history-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-history-002","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-history-003","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-correction-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-info-limit-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}
+{"case_id":"reg-safety-001","notes":"","reviewed_at":"2026-08-27T14:00:00+09:00","reviewer":"human-reviewer-gyuhan","status":"approved"}

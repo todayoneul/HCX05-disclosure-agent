@@ -1,0 +1,20 @@
+{
+  "label": "provisional Task 3 lexical smoke set; not Task 5 gold",
+  "cases": [
+    {"id":"sktelecom-aix","query":"AIX 연구개발","corp_code":"00159023","expected_chunk_id":"periodic_20230512000710#01-00016","rationale":"SK텔레콤 연구개발 담당조직 AIX 원문"},
+    {"id":"hanmi-english","query":"HANMI Semiconductor","corp_code":"00161383","expected_chunk_id":"periodic_20230512000911#01-00003","rationale":"한미반도체 영문 상호 원문"},
+    {"id":"celltrion-ramsima","query":"2023년 1분기 세계 최초 바이오시밀러 램시마","corp_code":"00413046","base_year":2023,"expected_chunk_id":"periodic_20230512001099#01-00008","rationale":"2023년 1분기 셀트리온 사업 개요의 세계 최초 바이오시밀러 및 램시마 원문"},
+    {"id":"naver-subsidiaries","query":"2023년 102개사 연결법인 103개사","corp_code":"00266961","base_year":2023,"expected_chunk_id":"periodic_20230512001100#01-00002","rationale":"2023 NAVER 연결대상 종속회사 수치 원문"},
+    {"id":"doosan-fuelcell","query":"수소 발전 연료전지","corp_code":"01412725","expected_chunk_id":"periodic_20230512001368#01-00007","rationale":"두산퓨얼셀 발전용 연료전지 사업 원문"},
+    {"id":"rainbow-subsidiary-table","query":"2023년 1분기 연결대상 종속회사 개황","corp_code":"01261644","base_year":2023,"expected_chunk_id":"periodic_20230515000595#01-00002","rationale":"2023년 1분기 레인보우로보틱스 종속회사 표 원문"},
+    {"id":"kepco-engineering","query":"2023년 1분기 신규연결 연결대상회사의 변동내용","corp_code":"00159209","base_year":2023,"expected_chunk_id":"periodic_20230515000906#01-00003","rationale":"2023년 1분기 한전기술 종속회사 변동 표 원문"},
+    {"id":"autoever-ito","query":"IT Outsourcing 전산시스템","corp_code":"00362441","expected_chunk_id":"periodic_20230515001367#01-00007","rationale":"현대오토에버 ITO 사업 원문"},
+    {"id":"skhynix-memory","query":"DRAM NAND 메모리반도체","corp_code":"00164779","expected_chunk_id":"periodic_20230515001677#01-00008","rationale":"SK하이닉스 주력 제품 원문"},
+    {"id":"mobis-autonomous","query":"자율 주행 앱티브","corp_code":"00164788","expected_chunk_id":"periodic_20230515001771#01-00014","rationale":"현대모비스 자율주행 합작계약 원문; spacing/prefix variation"},
+    {"id":"lges-2024-battery","query":"2024년 1분기 에너지솔루션 단일 사업부문","corp_code":"01515323","base_year":2024,"expected_chunk_id":"periodic_20240514000898#01-00008","rationale":"2024년 1분기 LG에너지솔루션 단일 사업부문 개요"},
+    {"id":"woori-2024-nuclear","query":"원자력발전소 감시제어시스템","corp_code":"00231044","expected_chunk_id":"periodic_20240516000090#01-00007","rationale":"2024 우리기술 원전 제어 사업 원문"},
+    {"id":"meritz-latest-correction","query":"2024년 2월 6일 정정대상","corp_code":"00860332","latest_only":true,"expected_chunk_id":"periodic_20240206000393#01-00001","rationale":"정정 체인의 현재 latest 정정신고 원문"},
+    {"id":"meritz-nonlatest-history","query":"2023년 6월 27일 정정대상","corp_code":"00860332","latest_only":false,"expected_chunk_id":"periodic_20230627000387#01-00001","rationale":"history-mode non-latest 정정본 원문; latest_only=false 필터 검증"}
+  ],
+  "limitations": ["Hand-inspected supplied-corpus smoke cases only", "Not contest-wide quality evidence", "Task 5 must create the human-reviewed 72-question evaluation"]
+}

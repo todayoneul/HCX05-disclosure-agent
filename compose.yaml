@@ -1,0 +1,32 @@
+services:
+  disclosure-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: disclosure-agent:task12-local
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+      - ./data:/app/data:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    restart: unless-stopped
+    stop_grace_period: 5m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
