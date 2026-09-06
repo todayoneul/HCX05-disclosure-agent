@@ -24,6 +24,7 @@ from disclosure_agent.agent.prompts import (
     PLANNER_SYSTEM_PROMPT,
     ROUTING_POLICY_VERSION,
 )
+from disclosure_agent.agent.trace import TRACE_POLICY_VERSION
 from disclosure_agent.hcx import HcxChatResult, HcxClient, HcxClientConfig, NativeV3Request
 from disclosure_agent.retrieval.fts import (
     RetrievalIndex,
@@ -125,6 +126,7 @@ def _prompt_config_version(
             "response": asdict(response_config),
             "planner": PLANNER_SYSTEM_PROMPT,
             "routing_policy": ROUTING_POLICY_VERSION,
+            "trace_policy": TRACE_POLICY_VERSION,
             "final": FINAL_SYSTEM_PROMPT,
         },
         ensure_ascii=False,
@@ -197,7 +199,11 @@ def build_production_service(
     runtime_config = RuntimeConfig()
     retry_gateway = BoundedRetryGateway(transport, config=runtime_config)
     agent_config = AgentConfig(deadline_seconds=runtime_config.hard_deadline_seconds)
-    response_config = ResponseConfig()
+    # Deterministic answers already carry a stable, grounded lead-in.  Avoid an
+    # optional HCX presentation call for those answers in production: it adds
+    # retry/rate-limit risk without changing any locked fact.  Model-authored
+    # answer repair remains available through the same gateway.
+    response_config = ResponseConfig(enable_deterministic_presentation=False)
     identity = RuntimeIdentity(
         registry.lineage,
         _prompt_config_version(agent_config, response_config),

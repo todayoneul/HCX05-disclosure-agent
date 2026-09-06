@@ -33,10 +33,41 @@ def test_sample_index_is_nonpublishable_and_search_is_safe(pipeline_fixture, tmp
     assert index.search_chunks("가 " * 500)["status"] == "info_limit"
 
 
+def test_search_chunks_filters_exact_base_month_via_verified_pipeline_metadata(
+    pipeline_fixture, tmp_path
+):
+    output = tmp_path / "retrieval-v1"
+    release = build_index(pipeline_fixture, output, limit=2, publish=False)
+    index = RetrievalIndex(pipeline_fixture, release=release)
+
+    matching = index.search_chunks(
+        "수소 전기차",
+        corp_code="001",
+        doc_subtype="annual",
+        base_year=2022,
+        base_month=12,
+    )
+    missing = index.search_chunks(
+        "수소 전기차",
+        corp_code="001",
+        doc_subtype="annual",
+        base_year=2022,
+        base_month=3,
+    )
+
+    assert matching["status"] == "ok"
+    assert matching["data"][0]["chunk_id"] == "c-new-1"
+    assert missing["status"] == "not_found"
+
+
 def test_match_query_has_bounded_complexity():
-    assert _match_query("수소 수소 전기차") == '"수소"* OR "전기차"*'
+    # Short common tokens are matched exactly (no prefix) so a catastrophic
+    # prefix posting-list expansion cannot make the OR scan blow the deadline;
+    # longer discriminative tokens keep the prefix for Korean suffix recall.
+    assert _match_query("수소 수소 전기차") == '"수소" OR "전기차"'
+    assert _match_query("삼성전자 매출") == '"삼성전자"* OR "매출"'
     assert _match_query("가 " * 500) is None
-    assert _match_query("aa " * 33) == '"aa"*'
+    assert _match_query("aa " * 33) == '"aa"'
 
 
 def test_exact_receipts_are_boundary_checked_deduplicated_and_bounded():

@@ -6,7 +6,7 @@ from types import MappingProxyType
 import pytest
 
 from disclosure_agent.agent import GroundedAnswerBuilder
-from disclosure_agent.agent.validator import SAFE_FALLBACK_ANSWER
+from disclosure_agent.agent.validator import SAFE_FALLBACK_ANSWER, is_safe_fallback_answer
 from disclosure_agent.context import EvidenceItem
 from disclosure_agent.hcx import Usage
 from disclosure_agent.hcx.errors import HcxContractError, HcxResponseError
@@ -188,8 +188,11 @@ def test_cited_reranker_answer_is_revalidated_against_packed_evidence() -> None:
     response = GroundedAnswerBuilder().build("테스트회사 공시 질의", run)
 
     assert run.model_call_count == 1
-    assert response.answer == (
-        "근거 본문 2024\n"
+    from disclosure_agent.agent.presentation import expand_citations
+    assert expand_citations(response.answer) == (
+        "근거 본문 2024\n\n"
+        "근거 문서\n"
+        "- 테스트회사: "
         "[근거: 사업보고서 | 20240830000001 | II. 사업의 내용]"
     )
 
@@ -204,7 +207,8 @@ def test_ungrounded_reranker_claim_falls_back_without_repair() -> None:
 
     response = GroundedAnswerBuilder().build("테스트회사 공시 질의", run)
 
-    assert response.answer == SAFE_FALLBACK_ANSWER
+    assert response.answer.startswith(SAFE_FALLBACK_ANSWER)
+    assert is_safe_fallback_answer(response.answer)
 
 
 def test_no_citation_result_becomes_information_limit() -> None:
@@ -227,7 +231,7 @@ def test_no_citation_result_becomes_information_limit() -> None:
     assert run.outcome == "information_limit"
     assert GroundedAnswerBuilder().build(
         "테스트회사 공시 질의", run
-    ).answer == SAFE_FALLBACK_ANSWER
+    ).answer.startswith(SAFE_FALLBACK_ANSWER)
 
 
 def test_unknown_reranker_markup_fails_closed() -> None:

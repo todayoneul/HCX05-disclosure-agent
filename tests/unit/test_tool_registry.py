@@ -77,6 +77,7 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
     )
     assert [tool["function"]["name"] for tool in payload] == [
         "resolve_company",
+        "resolve_sector",
         "query_events",
         "list_filings",
         "list_sections",
@@ -97,6 +98,13 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
     }
     assert snapshot == {
         "resolve_company": {
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 200}
+            },
+            "additionalProperties": False,
+        },
+        "resolve_sector": {
             "required": ["query"],
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 200}
@@ -125,6 +133,7 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
                 "event_to": {"type": "string", "pattern": "^[0-9]{8}$"},
                 "amount_min": {"type": "string", "minLength": 1, "maxLength": 100},
                 "amount_max": {"type": "string", "minLength": 1, "maxLength": 100},
+                "include_details": {"type": "boolean"},
                 "latest_only": {"type": "boolean"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
@@ -159,6 +168,10 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
             "properties": {
                 "doc_id": {"type": "string", "minLength": 1, "maxLength": 100},
                 "rcept_no": {"type": "string", "pattern": "^[0-9]{14}$"},
+                "financial_basis": {
+                    "type": "string",
+                    "enum": ["consolidated", "separate"],
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "additionalProperties": False,
@@ -170,6 +183,7 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
                 "doc_id": {"type": "string", "minLength": 1, "maxLength": 100},
                 "rcept_no": {"type": "string", "pattern": "^[0-9]{14}$"},
                 "max_chars": {"type": "integer", "minimum": 1, "maximum": 12000},
+                "part_from": {"type": "integer", "minimum": 1, "maximum": 10000},
             },
             "additionalProperties": False,
         },
@@ -185,6 +199,7 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
                 },
                 "doc_subtype": {"type": "string", "minLength": 1, "maxLength": 100},
                 "base_year": {"type": "integer", "minimum": 1900, "maximum": 9999},
+                "base_month": {"type": "integer", "minimum": 1, "maximum": 12},
                 "latest_only": {"type": "boolean"},
                 "path_hint": {"type": "string", "minLength": 1, "maxLength": 500},
                 "k": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -211,12 +226,15 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
                         "divide",
                         "ratio_percent",
                         "percent_change",
+                        "sum",
+                        "rank_desc",
+                        "rank_ratio_desc",
                     ],
                 },
                 "inputs": {
                     "type": "array",
-                    "minItems": 2,
-                    "maxItems": 2,
+                    "minItems": 1,
+                    "maxItems": 20,
                     "items": {"type": "string", "minLength": 1, "maxLength": 100},
                 },
                 "scale": {"type": "integer", "minimum": 0, "maximum": 12},
@@ -239,6 +257,79 @@ def test_function_calling_schema_snapshot_is_closed_and_native_v3_compatible(
     )
     payload[0]["function"]["parameters"]["properties"].clear()
     assert registry.schema_payload()[0]["function"]["parameters"]["properties"]
+
+
+def test_resolve_sector_is_a_closed_metadata_tool(
+    disclosure_fixture, pipeline_fixture
+):
+    registry = make_registry(disclosure_fixture, pipeline_fixture)
+
+    resolved = registry.dispatch(
+        "resolve_sector", {"query": "자동차 회사 중 매출 1위"}
+    )
+
+    assert resolved.status == "ok"
+    assert resolved.citations == ()
+    assert resolved.evidence == ()
+    assert resolved.data["sector"] == "자동차·모빌리티"
+    assert [row["corp_code"] for row in resolved.data["candidates"]] == ["001"]
+    assert "resolve_sector" in [
+        item["function"]["name"] for item in registry.schema_payload()
+    ]
+
+
+def test_registry_dispatches_bounded_sum_and_stable_ranking(
+    disclosure_fixture, pipeline_fixture
+):
+    registry = make_registry(disclosure_fixture, pipeline_fixture)
+
+    summed = registry.dispatch(
+        "calculate", {"operation": "sum", "inputs": ["1.25", "2.75"]}
+    )
+    ranked = registry.dispatch(
+        "calculate",
+        {"operation": "rank_desc", "inputs": ["2", "3", "3"]},
+    )
+    ratio_ranked = registry.dispatch(
+        "calculate",
+        {
+            "operation": "rank_ratio_desc",
+            "inputs": ["100049", "1000000", "100041", "1000000"],
+        },
+    )
+
+    assert summed.status == "ok"
+    assert summed.data["result"] == "4.00"
+    assert ranked.status == "ok"
+    assert ranked.data["ordered_indices"] == (1, 2, 0)
+    assert ratio_ranked.status == "ok"
+    assert ratio_ranked.data["ordered_indices"] == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("operation", "inputs"),
+    [
+        ("add", ["1"]),
+        ("sum", []),
+        ("rank_desc", ["1"]),
+        ("rank_desc", ["1"] * 11),
+        ("rank_ratio_desc", ["1", "2"]),
+        ("rank_ratio_desc", ["1", "2", "3"]),
+        ("rank_ratio_desc", ["1", "2"] * 11),
+    ],
+)
+def test_registry_rejects_operation_specific_calculation_arity(
+    disclosure_fixture, pipeline_fixture, operation, inputs
+):
+    registry = make_registry(disclosure_fixture, pipeline_fixture)
+
+    rejected = registry.dispatch(
+        "calculate", {"operation": operation, "inputs": inputs}
+    )
+
+    assert rejected.status == "error"
+    assert rejected.error is not None
+    assert rejected.error.code == "invalid_arguments"
 
 
 @pytest.mark.parametrize(
@@ -273,10 +364,14 @@ def test_query_events_accepts_corp_name_and_resolves_internally(
 
     by_code = registry.dispatch("query_events", {"corp_code": "001"})
     by_name = registry.dispatch("query_events", {"corp_name": "현대자동차"})
+    with_details = registry.dispatch(
+        "query_events", {"corp_code": "001", "include_details": True}
+    )
 
     assert by_code.status == "ok"
     assert by_name.status == "ok"
     assert by_name.data == by_code.data
+    assert with_details.status == "ok"
     # Neither corp_code nor corp_name still violates the closed contract.
     assert registry.dispatch("query_events", {}).error.code == "invalid_arguments"
     # A supplied name outside the universe fails as not_found, not a hard error.

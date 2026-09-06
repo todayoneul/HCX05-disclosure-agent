@@ -35,6 +35,9 @@ class DisclosureTools:
     def resolve_company(self, query: str) -> dict:
         return self.company_resolver.resolve_company(query)
 
+    def resolve_sector(self, query: str) -> dict:
+        return self.company_resolver.resolve_sector(query)
+
     def query_events(self, corp_code: str, **filters) -> dict:
         return query_events(self.db_path, corp_code, **filters)
 

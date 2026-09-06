@@ -14,10 +14,13 @@ _artifact_archive/
 .worktrees/
 /artifacts
 
+# Public source repository: local-only inputs and generated outputs
 data/
-reports/
-과제소개자료/
-
 pipeline/out/
+eval/
+reports/
 orientation/
+과제소개자료/
+scratch/
+tmp/
 .DS_Store

@@ -7,10 +7,41 @@ from typing import Iterable, Mapping
 from disclosure_agent.context import PackedPassage
 
 
+# The citation grammar uses ASCII "[", "]" and "|" as structural delimiters, so a
+# field value that contains them must not present the same characters. Swap them
+# for their fullwidth twins, which the ASCII-delimiter parsers never treat as
+# structure yet read almost identically on screen — e.g. a "[기재정정]" report
+# name renders as "［기재정정］" instead of an unreadable "%5B기재정정%5D".
+_CITATION_DELIMITER_DISPLAY = {
+    "[": "［",  # U+FF3B FULLWIDTH LEFT SQUARE BRACKET
+    "]": "］",  # U+FF3D FULLWIDTH RIGHT SQUARE BRACKET
+    "|": "｜",  # U+FF5C FULLWIDTH VERTICAL LINE
+}
+
+
+def citation_field_token(value: object) -> str:
+    """Render a citation field so its text cannot be confused with the citation
+    grammar while staying human-readable. The three ASCII delimiters are swapped
+    for fullwidth twins; control characters (which never occur in a real report
+    name and keep the fail-closed newline check intact) are percent-escaped. The
+    token is only ever string-matched, never decoded."""
+    rendered: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        substitute = _CITATION_DELIMITER_DISPLAY.get(character)
+        if substitute is not None:
+            rendered.append(substitute)
+        elif codepoint < 32 or codepoint == 127:
+            rendered.append(f"%{codepoint:02X}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
 def citation_token(citation: Mapping[str, object]) -> str:
     return (
-        f"[근거: {citation['report_nm']} | {citation['rcept_no']} | "
-        f"{citation['section']}]"
+        f"[근거: {citation_field_token(citation['report_nm'])} | "
+        f"{citation['rcept_no']} | {citation_field_token(citation['section'])}]"
     )
 
 
@@ -61,6 +92,7 @@ def build_answer_contract(
 
 __all__ = [
     "build_answer_contract",
+    "citation_field_token",
     "citation_token",
     "correction_disclosure",
     "requires_correction_disclosure",

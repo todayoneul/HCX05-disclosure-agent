@@ -155,16 +155,27 @@ def _validate_item(item: EvidenceItem) -> EvidenceItem:
 
 
 def _header(label: int, source_id: str, citation: Mapping[str, Any]) -> str:
-    base = (
-        f"[S{label}] source={source_id} | 접수번호={citation['rcept_no']} | "
-        f"회사={citation['corp_name']} | 보고서={citation['report_nm']} | "
-        f"접수일={citation['rcept_dt']} | 섹션={citation['section']}\n"
-    )
+    latest = "최신본" if citation["is_latest"] else "이전본"
+    correction = {
+        "original": "원본 공시",
+        "linked": "정정본",
+    }.get(str(citation["correction_status"]), str(citation["correction_status"]))
     return (
-        base[:-1]
-        + f" | latest={str(citation['is_latest']).lower()}"
-        + f" | correction={citation['correction_status']}\n"
+        f"[근거 S{label}]\n"
+        f"회사: {citation['corp_name']}\n"
+        f"문서: {citation['report_nm']}\n"
+        f"접수번호: {citation['rcept_no']}\n"
+        f"접수일: {citation['rcept_dt']}\n"
+        f"위치: {citation['section']}\n"
+        f"문서 상태: {latest}, {correction}\n"
+        "내용:\n"
     )
+
+
+def _public_body(text: str) -> str:
+    """Remove parser/display HTML artifacts from the public evidence string."""
+    text = re.sub(r"<br\s*/?>|&lt;br\s*/?&gt;", "\n", text, flags=re.IGNORECASE)
+    return re.sub(r"(?:&#x20;|&#32;|&nbsp;)", " ", text, flags=re.IGNORECASE)
 
 
 def _digest(source_id: str, spans: tuple[tuple[int, int], ...], body: str, citation: Mapping[str, Any]) -> str:
@@ -411,7 +422,7 @@ def pack_context(items: Iterable[EvidenceItem], config: PackerConfig = PackerCon
             )
             continue
         label = len(selected) + 1
-        block = _header(label, candidate.source_id, candidate.citation) + candidate.body
+        block = _header(label, candidate.source_id, candidate.citation) + _public_body(candidate.body)
         separator = _JOINING_SEPARATOR if rendered else ""
         fragment = separator + block
         if len(fragment) > config.max_passage_chars:

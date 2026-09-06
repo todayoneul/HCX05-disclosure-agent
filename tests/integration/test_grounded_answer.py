@@ -120,6 +120,7 @@ def test_first_final_request_contains_exact_packed_answer_contract() -> None:
 
     assert run.outcome == "completed"
     final_prompt = gateway.requests[-1].messages[1]["content"]
+    assert gateway.requests[-1].to_payload()["maxTokens"] == 1024
     assert '"allowed_citations"' in final_prompt
     assert "[근거: 사업보고서 | 20240830000001 | II. 사업의 내용]" in final_prompt
     assert '"required_correction_disclosures"' in final_prompt

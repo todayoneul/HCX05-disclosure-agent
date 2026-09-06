@@ -10,7 +10,11 @@ from types import MappingProxyType
 from typing import Protocol
 
 from disclosure_agent.agent import AgentRunResult, AnswerResponse, AnswerValidator
-from disclosure_agent.agent.validator import NO_MATCH_ANSWER, SAFE_FALLBACK_ANSWER
+from disclosure_agent.agent.validator import (
+    NO_MATCH_ANSWER,
+    SAFE_FALLBACK_ANSWER,
+    is_safe_fallback_answer,
+)
 
 from .contracts import EvaluationCase, EvaluationError
 from .review import ReviewedCaseCapability, _cases_from_review_capability
@@ -406,7 +410,7 @@ def _score_case(
     answerable_completed = (
         expected["disposition"] == "answerable"
         and run.outcome == "completed"
-        and response.answer != SAFE_FALLBACK_ANSWER
+        and not is_safe_fallback_answer(response.answer)
     )
     citation_ok = answerable_completed and not any(
         issue in {"citation_required", "citation_identity_mismatch"}
@@ -439,7 +443,7 @@ def _score_case(
     # validation refused the draft. This keeps abstentions no-hallucination
     # while the "search succeeded but grounding failed" signal is preserved as a
     # diagnostic secondary reason below.
-    served_abstention = response.answer in {SAFE_FALLBACK_ANSWER, NO_MATCH_ANSWER}
+    served_abstention = is_safe_fallback_answer(response.answer)
     disposition = expected["disposition"]
     if disposition == "answerable":
         disposition_ok = run.outcome == "completed" and not served_abstention

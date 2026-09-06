@@ -6,7 +6,7 @@ from types import MappingProxyType
 import pytest
 
 from disclosure_agent.agent import AgentRunner, GroundedAnswerBuilder
-from disclosure_agent.agent.validator import SAFE_FALLBACK_ANSWER
+from disclosure_agent.agent.validator import SAFE_FALLBACK_ANSWER, is_safe_fallback_answer
 from disclosure_agent.context import EvidenceItem
 from disclosure_agent.hcx import HcxChatResult, ToolCall
 from disclosure_agent.tool_registry import ToolDispatchResult, ToolLineage
@@ -119,7 +119,8 @@ def test_safety_and_information_limit_questions_never_create_a_factual_answer(
 
     response = GroundedAnswerBuilder().build(question, run)
 
-    assert response.answer == SAFE_FALLBACK_ANSWER
+    assert response.answer.startswith(SAFE_FALLBACK_ANSWER)
+    assert is_safe_fallback_answer(response.answer)
     assert "Bearer" not in response.answer
     assert "system prompt" not in response.think_trace.casefold()
     assert "시스템 프롬프트" not in response.think_trace
@@ -154,7 +155,8 @@ def test_instruction_like_retrieved_text_cannot_override_final_validator() -> No
 
     response = GroundedAnswerBuilder().build("테스트회사 공시를 확인해줘", run)
 
-    assert response.answer == SAFE_FALLBACK_ANSWER
+    assert response.answer.startswith(SAFE_FALLBACK_ANSWER)
+    assert is_safe_fallback_answer(response.answer)
     assert "fixture-secret" not in response.answer
     assert "fixture-secret" not in response.think_trace
 
@@ -174,7 +176,7 @@ def test_malformed_tool_arguments_fail_closed_without_dispatch() -> None:
     assert "malformed_tool_call" in run.limitations
     assert GroundedAnswerBuilder().build(
         "공시를 찾아줘", run
-    ).answer == SAFE_FALLBACK_ANSWER
+    ).answer.startswith(SAFE_FALLBACK_ANSWER)
 
 
 def test_repeated_tool_loop_stops_after_one_dispatch() -> None:
@@ -189,4 +191,4 @@ def test_repeated_tool_loop_stops_after_one_dispatch() -> None:
     assert "repeated_tool_call" in run.limitations
     assert GroundedAnswerBuilder().build(
         "공시를 찾아줘", run
-    ).answer == SAFE_FALLBACK_ANSWER
+    ).answer.startswith(SAFE_FALLBACK_ANSWER)

@@ -13,11 +13,13 @@ from disclosure_agent.hcx.client import _parse_tool_calls
 from disclosure_agent.tool_registry import ToolDispatchResult, ToolRegistry
 
 
-def _citation(*, correction_status: str = "original") -> dict[str, object]:
+def _citation(
+    *, correction_status: str = "original", corp_code: str = "001"
+) -> dict[str, object]:
     return {
         "doc_id": "fixture-doc",
         "rcept_no": "20240830000001",
-        "corp_code": "001",
+        "corp_code": corp_code,
         "corp_name": "테스트회사",
         "report_nm": "사업보고서",
         "rcept_dt": "20240830",
@@ -81,7 +83,7 @@ class FakeDisclosure:
 
     def query_events(self, corp_code: str, **filters: object) -> dict[str, object]:
         self.calls.append(("query_events", {"corp_code": corp_code, **filters}))
-        citation = _citation()
+        citation = _citation(corp_code=corp_code)
         row = {
             "doc_id": citation["doc_id"],
             "event_type": "supply_contract",
@@ -353,17 +355,20 @@ def test_actual_hcx_parser_array_arguments_are_thawed_before_registry_dispatch()
     )
     registry = _registry()
 
+    # The question deliberately avoids event keywords (e.g. "공급계약") so the
+    # event-preflight canonicalization does not replace the planner's arguments;
+    # this isolates the behavior under test — parser arrays reach the registry as
+    # thawed lists, not frozen tuples — from event-type normalization, which is
+    # covered by its own tests.
     outcome = AgentRunner(gateway, registry).run(
-        "dev-parser-arrays", "테스트회사의 공급계약을 알려줘"
+        "dev-parser-arrays", "테스트회사의 최근 이벤트를 알려줘"
     )
 
     assert outcome.outcome == "completed"
-    assert registry.calls == [
-        (
-            "query_events",
-            {"corp_code": "001", "event_types": ["supply_contract"]},
-        )
-    ]
+    assert (
+        "query_events",
+        {"corp_code": "001", "event_types": ["supply_contract"]},
+    ) in registry.calls
 
 
 @pytest.mark.parametrize("tool_name", ["unknown_tool", "search_chunks"])

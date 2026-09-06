@@ -9,12 +9,13 @@ from .validator import (
     AnswerValidationError,
     AnswerValidator,
     GroundedAnswerBuilder,
+    is_safe_fallback_answer,
     ResponseConfig,
 )
 
 __all__ = [
     "AgentConfig", "AgentConfigurationError", "AgentInputError", "AgentRunResult",
     "AgentRunner", "AnswerResponse", "AnswerValidationError", "AnswerValidator",
-    "AuditEvent", "GroundedAnswerBuilder", "ModelGateway", "NO_MATCH_ANSWER",
+    "AuditEvent", "GroundedAnswerBuilder", "is_safe_fallback_answer", "ModelGateway", "NO_MATCH_ANSWER",
     "ResponseConfig", "SAFE_FALLBACK_ANSWER",
 ]

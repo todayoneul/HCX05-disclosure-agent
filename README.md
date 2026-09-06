@@ -1,269 +1,193 @@
-<div align="center">
+# 금융 공시 질의응답 에이전트 (Disclosure Agent)
 
-# HCX05-disclosure-agent
+한국어 기업 공시를 근거로 재무 수치, 공시 이벤트, 정정 이력, 기업 개요와 사업 내용을
+조회·계산·요약하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다.
+HyperCLOVA X(HCX-005)는 복합 질의의 오케스트레이션을 담당하고, 수치 조회·계산·근거
+검증은 결정적 도구와 Python `Decimal` 기반 로직으로 처리합니다.
 
-### 70개 상장사. 4,204건 금융 공시. 268K 청크. 환각 0건의 고신뢰 RAG 에이전트.
-
-<p>
-한국어 금융 도메인에 특화된 엔드투엔드(End-to-End) 공시 질의응답 및 검색 증강 생성(RAG) 파이프라인.<br>
-HyperCLOVA X · SQLite FTS5 · 결정론적 Grounded 도구군 · FastAPI 단일 워커 서빙 게이트.
-</p>
-
-<p>
-<img src="https://img.shields.io/badge/Python-3.13.11-blue?style=flat-square&logo=python" alt="Python">
-<img src="https://img.shields.io/badge/Model-HyperCLOVA%20X%20HCX--005-green?style=flat-square" alt="HyperCLOVA X">
-<img src="https://img.shields.io/badge/Search-SQLite%20FTS5%20unicode61-orange?style=flat-square" alt="SQLite FTS5">
-<img src="https://img.shields.io/badge/Serving-FastAPI%20%26%20Docker-lightgrey?style=flat-square&logo=docker" alt="Docker">
-<img src="https://img.shields.io/badge/Endpoint-SLA%20%3C%20300s-brightgreen?style=flat-square" alt="SLA">
-<img src="https://img.shields.io/badge/License-Apache--2.0-blue?style=flat-square" alt="License">
-</p>
+이 저장소는 공개 가능한 애플리케이션 소스와 서빙 계약을 제공합니다. 주최 측 제공 원본
+코퍼스, 생성된 SQLite/FTS 인덱스, 운영 산출물, 평가 케이스와 자격 증명은 저장소에
+포함하지 않습니다.
 
 <table>
 <tr>
-<td align="center"><b>70</b><br><sub>분석 대상 상장사</sub></td>
-<td align="center"><b>4,204</b><br><sub>정제 공시 보고서</sub></td>
-<td align="center"><b>268,375</b><br><sub>인덱싱 청크</sub></td>
-<td align="center"><b>2.06 s</b><br><sub>실측 중앙값 지연시간 (p50)</sub></td>
-<td align="center"><b>60 / 60</b><br><sub>공식 평가 규격 준수</sub></td>
-<td align="center"><b>0</b><br><sub>환각 및 전송 오류</sub></td>
+<td align="center"><b>70</b><br><sub>대상 기업</sub></td>
+<td align="center"><b>4,204</b><br><sub>공시 문서</sub></td>
+<td align="center"><b>9</b><br><sub>결정적 도구</sub></td>
+<td align="center"><b>270 s</b><br><sub>내부 hard deadline</sub></td>
+<td align="center"><b>1</b><br><sub>FastAPI worker</sub></td>
 </tr>
 </table>
 
-<p><b>동일한 대규모 공시 데이터베이스에서, 엄격한 근거에 기반한 재현 가능한 답변을 산출합니다.</b><br>공개 60문항 실측 벤치마크 결과:</p>
+## 핵심 설계 원칙
 
-<table>
-<tr>
-<th align="left">평가 질의 난이도</th>
-<th align="center">문항 수</th>
-<th align="center">평균 점수 (10점 만점)</th>
-<th align="center">충족률</th>
-<th align="left">특징 및 처리 파이프라인</th>
-</tr>
-<tr>
-<td align="left"><b>쉬움 (Easy)</b></td>
-<td align="center">20문항</td>
-<td align="center"><b>8.90</b></td>
-<td align="center">100% (20/20)</td>
-<td>단일 공시 손익계산서/대차대조표 정밀 인용 및 종목코드 자동 해소</td>
-</tr>
-<tr>
-<td align="left"><b>중간 (Medium)</b></td>
-<td align="center">20문항</td>
-<td align="center"><b>7.80</b></td>
-<td align="center">85% (17/20)</td>
-<td>다기업(삼성 vs SK) 비교, 4분기 실적 역산, 단일판매·공급계약 집계</td>
-</tr>
-<tr>
-<td align="left"><b>어려움 (Hard)</b></td>
-<td align="center">20문항</td>
-<td align="center"><b>6.75</b></td>
-<td align="center">75% (15/20)</td>
-<td>다분기 복합 차감 영업이익률(8.57%), 정정 계보 추적, 안전 기권</td>
-</tr>
-<tr>
-<td align="left"><b>전체 종합 (Total)</b></td>
-<td align="center"><b>60문항</b></td>
-<td align="center"><b>7.82</b></td>
-<td align="center"><b>86.7%</b></td>
-<td><b>평균 지연 6.59초 (p50 2.06초, p95 20.15초), 전송 오류 0건</b></td>
-</tr>
-</table>
+### 결정적 도구 우선
 
-<sub>모든 수치는 실제 프로덕션 서버(NCP VM)의 공식 엔드포인트(<code>GET /answer</code>) 60회 순차 호출 실측 결과입니다. 수치와 인용은 코드가 결정론적으로 고정하며, HyperCLOVA X는 설명 문장 오케스트레이션만을 수행하여 모델에 의한 수치 왜곡을 원천 배제합니다.</sub>
+회사 식별, 업종 후보 확정, 공시 이벤트 조회, 공시 목록·목차 탐색, 원문 섹션 조회,
+어휘 검색, 정정 이력 조회, 사칙연산은 닫힌 도구 집합으로 처리합니다.
 
-</div>
+재무비율·증감률·기간 차감과 같은 계산은 모델이 암산하지 않고 Python `Decimal` 기반
+계산기로 수행합니다. 따라서 모델의 생성 확률에 따라 수치·단위·반올림이 달라지지 않습니다.
 
----
+### 정정 공시 계보 보존
 
-## 실제 동작 예시 (Terminal Demos)
+원본 공시와 정정 공시를 `root_rcept_no` 및 `latest_rcept_no` 기준으로 연결합니다. 답변은
+최신 여부와 관련 접수번호를 근거에 포함하며, 모호하거나 미해결된 연결은 확정된 최신
+사실로 취급하지 않습니다.
 
-### 1. 단일 공시 연결 손익계산서 정밀 인용 (1.91초 소요)
-단순 텍스트 매칭에 의존하지 않고, 보고서의 정확한 회계 섹션(재무제표 > 연결 손익계산서)을 식별하여 단위 및 근거 원문을 보존합니다.
+### 유계 플래너와 사후 검증
 
-```console
-$ curl -sG http://101.79.25.134/answer \
-       --data-urlencode "question_id=E-C01" \
-       --data-urlencode "question=삼성전자의 2023년 사업보고서 연결 기준 매출액은 얼마인가요?"
+단일 재무지표, 비율 계산, 업종 순위, 이벤트 합계와 같은 정형 질의는 모델 호출 없이
+결정적 경로로 처리합니다. 복합·자유 질의만 HyperCLOVA X 플래너로 전달하며, 도구 호출
+8회, 모델 호출 6회, 내부 hard deadline 270초의 실행 한도를 둡니다.
 
-{
-  "answer": "- 연결 영업수익: 258,935,494백만원. 삼성전자의 2023년 사업보고서 (2023.12)에서 확인한 연결 기준 영업수익이며, 공시에 표시된 백만원 단위를 적용했습니다. 근거 회사는 삼성전자이며, 근거 문서는 2023년 사업보고서 (2023.12)의 III. 재무에 관한 사항 > 2. 연결재무제표 > 2-2. 연결 손익계산서입니다.",
-  "citation": "[근거: 사업보고서 (2023.12) | 20240312000736 | III. 재무에 관한 사항 > 2. 연결재무제표 > 2-2. 연결 손익계산서]",
-  "rcept_no": "20240312000736",
-  "corp_code": "00126380",
-  "status": "completed"
-}
-```
+생성된 초안은 답변의 핵심 수치와 인용 접수번호가 실제 근거와 일치하는지 다시 검증합니다.
+근거가 부족하거나 요청 범위를 벗어나면 추측 대신 정보 한계 응답으로 종료합니다.
 
-### 2. 다분기 복합 연산: 4분기 실적 및 영업이익률 역산 (1.33초 소요)
-공시 본문에 명시되지 않는 '4분기 단독 실적'을 연간 사업보고서와 3분기 누적 보고서의 차감 연산을 통해 도출하고, 정확한 피연산자와 두 공시의 접수번호를 동시에 인용합니다.
-
-```console
-$ curl -sG http://101.79.25.134/answer \
-       --data-urlencode "question_id=H-C02" \
-       --data-urlencode "question=삼성전자의 2024년 4분기 연결 영업이익률을 연간 실적과 3분기 누적 실적의 차이로 계산해 주세요."
-
-{
-  "answer": "- 삼성전자 2024년 4분기 연결 영업이익률: 8.57% (영업이익 6,492,703백만원 = 연간 32,725,961백만원 - 3분기 누적 26,233,258백만원; 매출액 75,788,269백만원 = 연간 300,870,903백만원 - 3분기 누적 225,082,634백만원).",
-  "citation": "[근거: 사업보고서 (2024.12) | 20250311001085 | III. 재무에 관한 사항 > 2. 연결재무제표 > 2-2. 연결 손익계산서][근거: 분기보고서 (2024.09) | 20241114002642 | III. 재무에 관한 사항 > 2. 연결재무제표 > 2-2. 연결 손익계산서]",
-  "rcept_no": "20250311001085",
-  "corp_code": "00126380",
-  "status": "completed"
-}
-```
-
-### 3. 미공시 미래 예측 및 투자 권유 즉시 차단 (0.03초 소요)
-공시 범위 밖의 주가 전망, 목표주가, 매수 추천 요청에 대해 불필요한 LLM 추론 비용을 소모하지 않고 안전 가드레일을 통해 즉각 사유를 명시하여 기각(Abstention)합니다.
-
-```console
-$ curl -sG http://101.79.25.134/answer \
-       --data-urlencode "question_id=E-O19" \
-       --data-urlencode "question=SK하이닉스 공시를 보고 지금 주식을 사도 되는지 추천해 주세요."
-
-{
-  "answer": "제공된 공시 근거만으로 검증 가능한 답변을 생성하지 못했습니다.
-확인하지 못한 이유: 미래 예측과 투자 의견은 확인된 DART 공시 사실만 제공하는 답변 범위에 해당하지 않습니다.",
-  "citation": "",
-  "rcept_no": "",
-  "corp_code": "00164779",
-  "status": "abstention"
-}
-```
-
----
-
-## 4가지 핵심 아키텍처 설계 결정 (The Four Pillars)
+## 시스템 구성
 
 ```mermaid
-flowchart TD
-    Q["자연어 질문 입력"] --> Router["1. 엔티티 & 기간 정규화 라우터
-(Multi-Company, 영문명, 종목코드 해소)"]
-    
-    subgraph DataEngineering ["데이터 무결성 & 정정 계통"]
-        Router --> Linker["2. 정정 공시 계통 추적 (Correction Linker)
-(Linked 702건 자동 치환 / 원본-정정본 보존)"]
-        Linker --> Store["불변 SQLite 데이터베이스
-(268,375건 청크 FTS5 & 이벤트 DB)"]
+flowchart TB
+    Q[질문 수신] --> S{입력·범위 검증}
+    S -- 범위 밖 또는 주입 --> X[정보 한계 응답]
+    S -- 정상 --> R{라우팅}
+
+    subgraph Deterministic[결정적 처리 계층]
+        R -- 정형 질의 --> D[9개 도구 + Decimal 계산]
+        D --> C[근거 컨텍스트 패킹]
     end
 
-    subgraph GroundedSearch ["결정론적 검색 & 구조 보존"]
-        Store --> Tools["Grounded 도구군
-(Company, Event, Filing, Section, Calc)"]
-        Tools --> Packer["3. 구조 보존형 컨텍스트 패킹
-(표 헤더 복제 / 2,400자 분할 / 160자 오버랩)"]
+    subgraph Agentic[유계 에이전트 계층]
+        R -- 복합 질의 --> P[HCX-005 플래너]
+        P --> D
     end
 
-    subgraph Orchestration ["모델 오케스트레이션 & 서빙"]
-        Packer --> PromptGate["4. 수치 고정형 프롬프트 & 가드레일
-(수치·인용은 코드 고정, 틀만 HCX-005 생성)"]
-        PromptGate --> FastAPI["FastAPI 서빙 게이트
-(SLA 300초 제어, 오류 0건, p50 2.06초)"]
+    subgraph Data[불변 데이터 계층]
+        DB[pipeline-v1 SQLite]
+        FTS[retrieval-v1 FTS5 unicode61]
+        L[정정 공시 계보]
     end
+
+    D --> DB
+    D --> FTS
+    D --> L
+    C --> V[사후 근거·수치·인용 검증]
+    V -- 실패 --> X
+    V -- 통과 --> A[답변 직렬화]
+    A --> API[FastAPI GET /answer]
 ```
 
-### 1. 정정 공시 계통 추적 (Correction Linker)
-공시는 동일한 사안에 대해 다수의 기재정정 문서가 누적됩니다. 본 시스템은 1,004건의 정정 공시를 추적하여:
-* **Linked (702건):** 원본 접수번호와 1:1 매핑하여 최신 공시 원문으로 자동 치환합니다.
-* **계보 보존:** 답변 인용에 `[정정: 상태=linked | 기준=정정본 | 원본=... | 정정본=...]`를 명시하여 정보의 출처와 정합성을 사용자에게 입증합니다.
+데이터 계층은 운영 환경에서 별도로 복원되는 불변 릴리즈입니다. 애플리케이션은 원본
+코퍼스를 직접 공개하거나 수정하지 않고, 검증된 SQLite 메타데이터와 FTS5 색인에
+읽기 전용으로 접근합니다.
 
-### 2. 다단 표(Markdown Table) 구조 보존형 청킹
-재무제표와 투자 계획은 대부분 다단 표 구조로 작성되어 있습니다. 단순 글자 수 기준으로 절단하면 컬럼 헤더가 소실되어 행의 의미가 왜곡됩니다.
-* 청크 분할 시 상단 헤더 및 열 구분자를 모든 하위 청크에 자동 복제 주입합니다.
-* 단일 패시지 상한 2,400자, 패시지 간 오버랩 160자, 전체 입력 컨텍스트 12,000자 상한을 엄격히 제어합니다.
+## 주요 처리 흐름
 
-### 3. 엔티티 및 다기업 라우팅 엔진
-질의에 포함된 다양한 기업 표현을 정확한 DART 고유 코드로 매핑합니다.
-* 영문 약칭(Samsung Electronics, YG Entertainment), 종목코드(005930, 000270), 과거 사명(삼성엔지니어링 → 삼성E&A)을 사전에 정규화합니다.
-* 복수 기업 비교 질의(삼성전자 vs SK하이닉스)의 경우, 각 기업의 컨텍스트를 분리 격리하여 문맥 오염(Context Leakage)을 방지합니다.
+1. 질문의 길이·제어문자·공시 범위를 검증합니다.
+2. 기업명, 영문명, 종목코드, 과거 사명을 DART 기업 식별자로 정규화합니다.
+3. 정형 질의는 결정적 도구로 직접 처리하고, 복합 질의는 유계 HCX 플래너로 라우팅합니다.
+4. 정정 공시 계보와 기준연도·연결/별도 기준을 확인합니다.
+5. 원문 섹션과 검색 청크를 컨텍스트로 패킹하고, 필요한 수치는 `Decimal`로 계산합니다.
+6. 답변의 수치·단위·인용 접수번호를 검증한 뒤 API 응답으로 직렬화합니다.
 
-### 4. 수치 고정형 오케스트레이션 & 안전 기권 (Hallucination-free)
-LLM에게 수치 계산이나 날짜 조합을 맡기면 토큰 확률에 따른 환각이 불가피합니다.
-* 수치 연산 및 차감 계산은 Python `Decimal` 기반의 `CalculateTool`이 전담합니다.
-* 모델(HyperCLOVA X)은 코드가 확정한 수치와 단위를 설명하는 자연어 문장 틀만을 생성하며, 근거가 불충분할 경우 사유를 명시하고 안전 기권(Abstention)합니다.
+## API 계약
 
----
+평가 및 운영 서버는 인증 없는 순차 `GET` 요청을 수신합니다.
 
-## 성능 벤치마크 및 검증 (Measured Metrics)
+```http
+GET /answer?question_id={id}&question={URL-encoded question}
+```
 
-### 1. 지연 시간 분포 (Latency Profile)
-공식 평가 환경과 동일한 단일 워커 구성에서 실측된 응답 시간입니다:
+성공 응답은 정확히 다음 다섯 개의 문자열 필드를 반환합니다.
 
-| 지표 | 실측값 | 비고 |
-| :--- | :--- | :--- |
-| **중앙값 (p50)** | **2.06초** | 단일 공시 재무지표 조회 케이스 |
-| **평균 (Average)** | **6.59초** | 다기업 비교 및 복합 연산 포함 전체 평균 |
-| **95분위 (p95)** | **20.15초** | 대량 텍스트 탐색 및 장문 요약 질의 |
-| **최대 (Max)** | **24.47초** | 300초 외부 타임아웃 대비 12배 이상의 안전 마진 |
-| **전송 실패 / 재시도** | **0건 / 0회** | 60회 전수 호출 단 한 번의 에러 없이 완주 |
+```json
+{
+  "question_id": "EVAL-001",
+  "question": "삼성전자 2024년 연결 매출액을 알려 주세요.",
+  "retrieved_context": "...",
+  "think_trace": "...",
+  "answer": "..."
+}
+```
 
-### 2. 검색 모듈 베이스라인 (Recall@10)
-순수 SQLite FTS5 기반 어휘 검색의 통제된 실험 벤치마크:
-* **Recall@10:** **51.72%** (15/29건, 청크 증거 필수 케이스 기준)
-* 형태소 변이 및 회계 계정명 불일치로 인한 한계를 인식하고, 기업코드 사전 필터링 및 섹션 직접 접근 도구(`FilingTool`, `EventTool`)를 결합하여 실질적인 프로덕션 질의 해결률을 **86.7%** 로 향상시켰습니다.
+`/healthz`는 모델을 호출하지 않고 서비스 준비 상태와 데이터 릴리즈 식별자를 확인합니다.
+잘못된 요청은 `422`, 내부 deadline 초과나 일시적 장애는 `503`으로 처리합니다.
 
----
+### 로컬 실행 예시
 
-## 빠른 시작 (Quickstart)
-
-### 로컬 컨테이너 실행
-
-```bash
-# 1. 저장소 복제 및 이동
-git clone https://github.com/todayoneul/HCX05-disclosure-agent.git
-cd HCX05-disclosure-agent
-
-# 2. 환경 변수 구성
+```sh
 cp .env.example .env
-# .env 파일에 NCP HyperCLOVA X API 키 입력
+# .env에 HCX_API_KEY를 로컬에서 설정
 
-# 3. Docker Compose 빌드 및 백그라운드 구동
+uv sync --locked --extra dev
+uv lock --check
+uv run python -c "import dotenv, requests; print('declared-runtime-imports: OK')"
+uv run pytest --collect-only -q
+uv run pytest -q
+
 docker compose build --pull
 docker compose up -d
+curl --fail http://127.0.0.1:8080/healthz
 
-# 4. 상태 점검 (무과금 헬스체크)
-curl http://127.0.0.1:8080/healthz
-
-# 5. 질의 응답 호출 (HyperCLOVA X 실추론)
-curl -sG http://127.0.0.1:8080/answer \
-     --data-urlencode "question_id=LOCAL-001" \
-     --data-urlencode "question=삼성전자 2023년 사업보고서 연결 매출액 알려줘"
+curl -G http://127.0.0.1:8080/answer \
+  --data-urlencode "question_id=LOCAL-001" \
+  --data-urlencode "question=삼성전자 2024년 연결 매출액을 알려 주세요."
 ```
 
-### 재현 가능한 로컬 테스트 (`uv` 기반)
+원본 데이터와 운영 릴리즈가 없는 공개 소스 체크아웃에서는 코드·계약 테스트와 컨테이너
+구성 검증을 수행할 수 있습니다. 실제 `/healthz` 및 `/answer` 실행에는 운영 환경에서
+검증된 데이터 릴리즈와 로컬 `.env`가 필요합니다.
 
-```bash
-# 의존성 동기화 (Python 3.13.11 락 고정)
-uv sync --locked --extra dev
+## 검증 기준
 
-# 모델 호출 없는 로컬 단위/계약 테스트 전수 실행
-uv run pytest -q
+| 항목 | 기준 |
+|---|---|
+| Python | 3.13.11, `uv.lock` 고정 |
+| 모델 | HyperCLOVA X HCX-005 native v3 |
+| 검색 | SQLite FTS5 `unicode61` 어휘 색인 |
+| 서빙 | FastAPI + Uvicorn, worker 1개 |
+| 컨테이너 | non-root 실행, read-only root filesystem, `/tmp` tmpfs |
+| 계산 | Python `Decimal` 기반 결정적 연산 |
+| 평가 계약 | 순차 호출, 내부 hard deadline 270초, 성공 시 5개 문자열 필드 |
+| 최신 런타임 기준 | `195808c9a777d6b4dd9749cb09eb46feabfad508` |
+
+제공 코퍼스 기반 검증은 데이터 릴리즈를 복원한 실행 환경에서 수행하며, 공개 저장소의
+기본 테스트는 모델 API를 호출하지 않습니다.
+
+## 저장소 구조
+
+```text
+src/disclosure_agent/
+├── agent/          # 플래너, 프롬프트, 답변 계약 및 검증기
+├── context/        # 컨텍스트 패킹
+├── corrections/    # 정정 공시 계보 추적
+├── hcx/            # HyperCLOVA X 클라이언트와 계약
+├── retrieval/      # SQLite FTS5 검색
+├── runtime/        # 예산·재시도·서비스 런타임
+├── server/         # FastAPI 애플리케이션
+└── tools/          # 회사·이벤트·공시·계산 도구
+
+pipeline/            # 데이터 처리 및 릴리즈 빌드 로직
+scripts/             # 감사·검색·평가·계약 검증 스크립트
+tests/               # 단위·계약·통합·E2E 테스트
+docs/API_SPEC.md     # HTTP API 명세
+docs/TECHNICAL_PROPOSAL.md  # 상세 설계 및 실험 문서
 ```
 
----
+## 공개 범위 및 보안
 
-## 프로젝트 구조 (Repository Structure)
+이 저장소에는 다음 항목을 포함하지 않습니다.
 
-```
-.
-├── Dockerfile                  # 단일 워커 FastAPI 경량 컨테이너 정의
-├── compose.yaml                # 로컬 서빙 및 포트 바인딩 설정
-├── pyproject.toml / uv.lock    # Python 3.13.11 재현 가능한 패키지 의존성
-├── src/disclosure_agent/
-│   ├── agent/                  # 프롬프트 빌더, 실행기, 답변 검증기
-│   ├── context/                # 마크다운 표 보존형 컨텍스트 패커
-│   ├── corrections/            # 정정 공시 계보 추적기 (Correction Linker)
-│   ├── hcx/                    # HyperCLOVA X 클라이언트 및 에러 핸들러
-│   ├── retrieval/              # SQLite FTS5 어휘 검색 엔진
-│   ├── server/                 # FastAPI 애플리케이션 (GET /answer, /healthz)
-│   └── tools/                  # 기업, 이벤트, 원문 섹션, 수치 연산 도구군
-├── scripts/                    # 인덱스 빌드 및 평가 검증 자동화 스크립트
-├── tests/                      # 계약, E2E, 단위 테스트 모음 (970+ 테스트)
-└── docs/                       # API 계약 규격 및 서버 런북
-```
+- 원본 DART XML·HTML·PDF 및 제공 코퍼스
+- SQLite·FTS5 운영 인덱스와 생성된 대용량 산출물
+- 개발·holdout 평가 케이스와 내부 검수 기록
+- 에이전트 인계 문서, 작업 프롬프트, 개인 환경 설정
+- `HCX_API_KEY` 및 기타 인증 정보
 
----
+`.env`, 데이터 디렉터리, 아티팩트와 런타임 산출물은 `.gitignore`로 관리합니다.
 
-## 라이선스 및 데이터 보안 (License & Policy)
+## 문서
 
-* **코드 라이선스:** [Apache License 2.0](LICENSE)
-* **데이터 보안:** 본 저장소는 대회 보안 및 저작권 규정에 따라 원본 DART 공시 XML/PDF 파일과 평가용 정답셋 바이너리를 일체 포함하지 않으며(추적 제외), 순수 소스 코드와 아키텍처 구현체만을 공개합니다.
-
+- [API 명세](docs/API_SPEC.md)
+- [기술제안서 및 상세 설계](docs/TECHNICAL_PROPOSAL.md)
+- [공개 소스 체크아웃 재현 안내](docs/SUBMISSION_REPRODUCE.md)

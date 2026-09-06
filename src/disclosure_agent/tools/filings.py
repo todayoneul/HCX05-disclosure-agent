@@ -53,13 +53,39 @@ def list_filings(db_path: Path | str, corp_code: str, *, doc_group: str | None =
     return result("ok" if data else "not_found", data, citations=[item["citation"] for item in data])
 
 
-def list_sections(db_path: Path | str, *, doc_id: str | None = None, rcept_no: str | None = None, limit: int = 200) -> dict:
+def list_sections(db_path: Path | str, *, doc_id: str | None = None, rcept_no: str | None = None, financial_basis: str | None = None, limit: int = 200) -> dict:
     identifier = _one_id(doc_id, rcept_no)
-    if identifier is None or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+    if identifier is None or financial_basis not in {None, "consolidated", "separate"} or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
         return error("exactly one identifier and limit 1..200 are required")
-    sql = f"SELECT c.path,COUNT(*) chunk_count,SUM(c.n_chars) n_chars,SUM(c.n_tables) n_tables,GROUP_CONCAT(c.part) parts, {DOCUMENT_FIELDS} FROM (SELECT * FROM chunk ORDER BY document_sequence,part,chunk_id) c JOIN document d ON d.doc_id=c.doc_id JOIN document_status ds ON ds.rcept_no=d.rcept_no LEFT JOIN correction_link cl ON cl.correction_rcept_no=d.rcept_no WHERE {identifier[0]}=? GROUP BY c.path ORDER BY MIN(c.document_sequence),c.path LIMIT ?"
+    where = [f"{identifier[0]}=?"]
+    params: list[object] = [identifier[1]]
+    if financial_basis == "consolidated":
+        where.extend(("c.path LIKE ?", "c.path LIKE ?"))
+        params.extend(("%연결%", "%재무제표%"))
+    elif financial_basis == "separate":
+        where.extend(("c.path NOT LIKE ?", "c.path LIKE ?"))
+        params.extend(("%연결%", "%재무제표%"))
+    # Filter before the ordered subquery, and never materialize source text.
+    # SQLite 3.40 (production) otherwise sorts every corpus body in /tmp; its
+    # 64 MiB serving tmpfs cannot hold that intermediate result. Keep ordering
+    # inside the subquery for deterministic GROUP_CONCAT on older SQLite too.
+    sql = f"""
+        SELECT c.path,COUNT(*) chunk_count,SUM(c.n_chars) n_chars,
+               SUM(c.n_tables) n_tables,GROUP_CONCAT(c.part) parts, {DOCUMENT_FIELDS}
+        FROM (
+            SELECT c.doc_id,c.path,c.part,c.document_sequence,c.n_chars,c.n_tables
+            FROM chunk c JOIN document d ON d.doc_id=c.doc_id
+            WHERE {' AND '.join(where)}
+            ORDER BY c.document_sequence,c.part,c.chunk_id
+        ) c
+        JOIN document d ON d.doc_id=c.doc_id
+        JOIN document_status ds ON ds.rcept_no=d.rcept_no
+        LEFT JOIN correction_link cl ON cl.correction_rcept_no=d.rcept_no
+        GROUP BY c.path ORDER BY MIN(c.document_sequence),c.path LIMIT ?
+    """
+    params.append(limit)
     with closing(connect_ro(db_path)) as connection:
-        rows = list(connection.execute(sql, (identifier[1], limit)))
+        rows = list(connection.execute(sql, params))
     data = []
     for row in rows:
         item = {**dict(row), "parts": [int(value) for value in row["parts"].split(",")], "citation": citation(row, row["path"])}
@@ -67,13 +93,15 @@ def list_sections(db_path: Path | str, *, doc_id: str | None = None, rcept_no: s
     return result("ok" if data else "not_found", data, citations=[item["citation"] for item in data])
 
 
-def read_section(db_path: Path | str, *, path: str, doc_id: str | None = None, rcept_no: str | None = None, max_chars: int = 20000) -> dict:
+def read_section(db_path: Path | str, *, path: str, doc_id: str | None = None, rcept_no: str | None = None, max_chars: int = 20000, part_from: int = 1) -> dict:
     identifier = _one_id(doc_id, rcept_no)
     if identifier is None or not isinstance(path, str) or not path or isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 1 <= max_chars <= 100000:
         return error("exactly one identifier, exact path, and max_chars 1..100000 are required")
-    sql = f"SELECT c.*, {DOCUMENT_FIELDS} FROM chunk c JOIN document d ON d.doc_id=c.doc_id JOIN document_status ds ON ds.rcept_no=d.rcept_no LEFT JOIN correction_link cl ON cl.correction_rcept_no=d.rcept_no WHERE {identifier[0]}=? AND c.path=? ORDER BY c.document_sequence,c.part,c.chunk_id"
+    if type(part_from) is not int or not 1 <= part_from <= 10000:
+        return error("part_from must be 1..10000")
+    sql = f"SELECT c.*, {DOCUMENT_FIELDS} FROM chunk c JOIN document d ON d.doc_id=c.doc_id JOIN document_status ds ON ds.rcept_no=d.rcept_no LEFT JOIN correction_link cl ON cl.correction_rcept_no=d.rcept_no WHERE {identifier[0]}=? AND c.path=? AND c.part>=? ORDER BY c.document_sequence,c.part,c.chunk_id"
     with closing(connect_ro(db_path)) as connection:
-        rows = list(connection.execute(sql, (identifier[1], path)))
+        rows = list(connection.execute(sql, (identifier[1], path, part_from)))
     selected, used = [], 0
     for row in rows:
         separator = 1 if selected else 0
@@ -88,4 +116,5 @@ def read_section(db_path: Path | str, *, path: str, doc_id: str | None = None, r
             break
     fully_consumed = sum(1 for item, row in zip(selected, rows) if len(item["text"]) == len(row["text"]))
     data = {"path": path, "chunks": selected, "text": "\n".join(item["text"] for item in selected), "truncated": fully_consumed < len(rows), "remaining_parts": len(rows) - fully_consumed}
+    data["next_part"] = rows[fully_consumed]["part"] if fully_consumed < len(rows) else None
     return result("ok" if selected else "not_found", data, citations=[item["citation"] for item in selected], limitations=["section text truncated"] if data["truncated"] else [])

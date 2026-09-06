@@ -16,4 +16,5 @@ def test_search_result_to_context_preserves_canonical_citation(
     packed = pack_context(items)
     assert packed.passages
     assert packed.passages[0].citation == response["data"][0]["citation"]
-    assert "접수번호=" in packed.rendered_context
+    assert "접수번호: " in packed.rendered_context
+    assert "내용:\n" in packed.rendered_context

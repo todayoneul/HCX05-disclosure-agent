@@ -30,7 +30,7 @@ def citation(row: sqlite3.Row | dict[str, Any], section: str) -> dict[str, Any]:
         "corp_code": str(values.get("corp_code") or ""),
         "corp_name": str(values.get("corp_name") or ""),
         "report_nm": str(values.get("report_nm") or ""),
-        "rcept_dt": str(values.get("rcept_dt") or ""),
+        "rcept_dt": str(values.get("rcept_dt") or "").replace("-", ""),
         "section": section,
         "is_latest": bool(values.get("is_latest", 0)),
         "root_rcept_no": str(values.get("root_rcept_no") or ""),

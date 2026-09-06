@@ -23,6 +23,7 @@ from disclosure_agent.tools.calculate import calculate
 
 _TOOL_NAMES = (
     "resolve_company",
+    "resolve_sector",
     "query_events",
     "list_filings",
     "list_sections",
@@ -31,7 +32,11 @@ _TOOL_NAMES = (
     "get_history",
     "calculate",
 )
-_GROUNDED_TOOLS = frozenset(_TOOL_NAMES) - {"resolve_company", "calculate"}
+_GROUNDED_TOOLS = frozenset(_TOOL_NAMES) - {
+    "resolve_company",
+    "resolve_sector",
+    "calculate",
+}
 _CANONICAL_CITATION_KEYS = frozenset(
     (
         "doc_id",
@@ -165,6 +170,11 @@ _SCHEMAS = (
         _parameters({"query": _string(minLength=1, maxLength=200)}, ["query"]),
     ),
     _tool(
+        "resolve_sector",
+        "Resolve one supplied-corpus sector and list its complete company candidates.",
+        _parameters({"query": _string(minLength=1, maxLength=200)}, ["query"]),
+    ),
+    _tool(
         "query_events",
         "Query structured disclosure events for one company by corp_code or corp_name.",
         _parameters(
@@ -180,6 +190,7 @@ _SCHEMAS = (
                 "event_to": _DATE,
                 "amount_min": _DECIMAL,
                 "amount_max": _DECIMAL,
+                "include_details": {"type": "boolean"},
                 "latest_only": {"type": "boolean"},
                 "limit": _integer(1, 50),
             },
@@ -209,9 +220,14 @@ _SCHEMAS = (
     ),
     _tool(
         "list_sections",
-        "List section paths for exactly one filing identifier.",
+        "List section paths for exactly one filing identifier, optionally filtered by financial-statement basis.",
         _parameters(
-            {"doc_id": _DOC_ID, "rcept_no": _RCEPT_NO, "limit": _integer(1, 50)},
+            {
+                "doc_id": _DOC_ID,
+                "rcept_no": _RCEPT_NO,
+                "financial_basis": _string(enum=["consolidated", "separate"]),
+                "limit": _integer(1, 50),
+            },
             [],
         ),
     ),
@@ -224,6 +240,7 @@ _SCHEMAS = (
                 "doc_id": _DOC_ID,
                 "rcept_no": _RCEPT_NO,
                 "max_chars": _integer(1, 12_000),
+                "part_from": _integer(1, 10_000),
             },
             ["path"],
         ),
@@ -237,6 +254,7 @@ _SCHEMAS = (
                 "corp_code": _CORP_CODE,
                 "doc_subtype": _DOC_SUBTYPE,
                 "base_year": _integer(1900, 9999),
+                "base_month": _integer(1, 12),
                 "latest_only": {"type": "boolean"},
                 "path_hint": _string(minLength=1, maxLength=500),
                 "k": _integer(1, 20),
@@ -251,7 +269,7 @@ _SCHEMAS = (
     ),
     _tool(
         "calculate",
-        "Run one bounded Decimal calculation on exactly two decimal strings.",
+        "Run one bounded Decimal calculation; binary operations take 2 inputs, sum takes 1..20, rank_desc takes 2..10 values, and rank_ratio_desc takes 2..10 numerator/denominator pairs.",
         _parameters(
             {
                 "operation": _string(
@@ -262,9 +280,12 @@ _SCHEMAS = (
                         "divide",
                         "ratio_percent",
                         "percent_change",
+                        "sum",
+                        "rank_desc",
+                        "rank_ratio_desc",
                     ]
                 ),
-                "inputs": _array(_DECIMAL, 2, 2),
+                "inputs": _array(_DECIMAL, 1, 20),
                 "scale": _integer(0, 12),
                 "rounding": _string(
                     enum=[
@@ -429,6 +450,25 @@ def _validate_semantics(tool_name: str, arguments: Mapping[str, Any]) -> None:
     if tool_name == "calculate":
         for index, value in enumerate(arguments["inputs"]):
             _validate_decimal(value, f"inputs[{index}]")
+        operation = arguments["operation"]
+        input_count = len(arguments["inputs"])
+        if operation == "sum" and not 1 <= input_count <= 20:
+            raise ValueError("sum requires 1..20 inputs")
+        if operation == "rank_desc" and not 2 <= input_count <= 10:
+            raise ValueError("rank_desc requires 2..10 inputs")
+        if operation == "rank_ratio_desc" and (
+            not 4 <= input_count <= 20 or input_count % 2 != 0
+        ):
+            raise ValueError(
+                "rank_ratio_desc requires 2..10 numerator/denominator pairs"
+            )
+        if operation == "rank_ratio_desc" and any(
+            Decimal(value.replace(",", "")) <= 0
+            for value in arguments["inputs"][1::2]
+        ):
+            raise ValueError("rank_ratio_desc denominators must be positive")
+        if operation not in {"sum", "rank_desc", "rank_ratio_desc"} and input_count != 2:
+            raise ValueError("binary calculation requires exactly 2 inputs")
 
 
 def _validate_citation(value: Any) -> Mapping[str, Any]:
@@ -696,6 +736,8 @@ class ToolRegistry:
     def _execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         if tool_name == "resolve_company":
             return self._disclosure.resolve_company(arguments["query"])
+        if tool_name == "resolve_sector":
+            return self._disclosure.resolve_sector(arguments["query"])
         if tool_name == "query_events":
             values = dict(arguments)
             corp_code = values.pop("corp_code")

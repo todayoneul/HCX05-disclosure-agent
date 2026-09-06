@@ -44,6 +44,11 @@ def _published_files(output: Path) -> tuple[Path, Path]:
 
 def test_current_corpus_matches_the_locked_contract() -> None:
     """Catches any unreviewed corpus drift in company, document, type, ID, or raw-file layout."""
+    # The supplied corpus ships as a GitHub Release asset (see
+    # docs/SUBMISSION_REPRODUCE.md). Skip when it has not been restored so a
+    # code-only checkout stays green; the contract still runs once data exists.
+    if not (REPO_ROOT / "data" / "3.공시" / "corpus" / "manifest.jsonl").is_file():
+        pytest.skip("corpus not restored; run scripts/restore_submission_assets.py")
     catalog = load_catalog(REPO_ROOT / "data" / "3.공시" / "corpus")
 
     catalog.assert_contract(CURRENT_CORPUS_CONTRACT)

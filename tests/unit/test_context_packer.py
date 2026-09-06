@@ -46,7 +46,7 @@ def test_context_is_ordered_deduplicated_and_strictly_bounded():
     )
     assert packed.passages[0].source_id == "high"
     assert len(packed.passages) <= 3
-    blocks = re.split(r"(?=\[S\d+\] )", packed.rendered_context)
+    blocks = re.split(r"(?=\[근거 S\d+\]\n)", packed.rendered_context)
     blocks = [block.rstrip("\n") for block in blocks if block]
     assert all(len(block) <= 500 for block in blocks)
     assert packed.char_count == len(packed.rendered_context) <= 1200
@@ -58,8 +58,29 @@ def test_public_pack_contract_exposes_schema_passage_ids_and_lineage_header():
 
     assert packed.schema_version == "context-pack-v1"
     assert packed.passages[0].passage_id == "S1"
-    assert "latest=true" in packed.rendered_context
-    assert "correction=original" in packed.rendered_context
+    assert "문서 상태: 최신본, 원본 공시" in packed.rendered_context
+
+
+def test_public_context_is_readable_korean_and_normalizes_html_breaks():
+    packed = pack_context(
+        (
+            evidence(
+                "readable-public-context",
+                "첫 문장<br>둘째 문장&lt;br&gt;셋째 문장&#x20;끝",
+            ),
+        )
+    )
+
+    assert "[근거 S1]" in packed.rendered_context
+    assert "회사: 삼성전자" in packed.rendered_context
+    assert "문서: 사업보고서" in packed.rendered_context
+    assert "접수번호: 20240312000736" in packed.rendered_context
+    assert "위치: II. 사업의 내용" in packed.rendered_context
+    assert "내용:\n첫 문장\n둘째 문장\n셋째 문장 끝" in packed.rendered_context
+    assert "source=" not in packed.rendered_context
+    assert "<br" not in packed.rendered_context.lower()
+    assert "&lt;br" not in packed.rendered_context.lower()
+    assert "&#x20;" not in packed.rendered_context.lower()
 
 
 @pytest.mark.parametrize(

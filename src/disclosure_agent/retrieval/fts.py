@@ -412,7 +412,13 @@ def _match_query(query: str) -> str | None:
     tokens = list(dict.fromkeys(token for token in raw if 2 <= len(token) <= 64))
     if not tokens or len(tokens) > 32:
         return None
-    match = " OR ".join(f'"{token}"*' for token in tokens)
+    # A prefix (``*``) on a short, common Korean token expands to an enormous
+    # posting list (e.g. ``"연결"*`` -> 연결/연결재무제표/…) and makes the OR scan
+    # catastrophically slow. Keep the prefix only for longer, discriminative
+    # tokens (company names, specific terms) and match short tokens exactly.
+    match = " OR ".join(
+        f'"{token}"*' if len(token) >= 4 else f'"{token}"' for token in tokens
+    )
     return match if len(match) <= 4096 else None
 
 
@@ -480,32 +486,71 @@ class RetrievalIndex:
         self.pipeline_release = bound_pipeline.release
         self.release = bound_retrieval.release
 
-    def search_chunks(self, query: str, *, corp_code: str | None = None, doc_subtype: str | None = None, base_year: int | None = None, latest_only: bool = True, path_hint: str | None = None, k: int = 10) -> dict[str, Any]:
-        invalid_filter = (corp_code is not None and not isinstance(corp_code, str)) or (doc_subtype is not None and not isinstance(doc_subtype, str)) or (base_year is not None and (isinstance(base_year, bool) or not isinstance(base_year, int) or not 1900 <= base_year <= 9999)) or not isinstance(latest_only, bool) or (path_hint is not None and not isinstance(path_hint, str))
+    def search_chunks(self, query: str, *, corp_code: str | None = None, doc_subtype: str | None = None, base_year: int | None = None, base_month: int | None = None, latest_only: bool = True, path_hint: str | None = None, k: int = 10) -> dict[str, Any]:
+        invalid_filter = (corp_code is not None and not isinstance(corp_code, str)) or (doc_subtype is not None and not isinstance(doc_subtype, str)) or (base_year is not None and (isinstance(base_year, bool) or not isinstance(base_year, int) or not 1900 <= base_year <= 9999)) or (base_month is not None and (isinstance(base_month, bool) or not isinstance(base_month, int) or not 1 <= base_month <= 12)) or not isinstance(latest_only, bool) or (path_hint is not None and not isinstance(path_hint, str))
         if not isinstance(query, str) or len(query) > 1000 or isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 50 or invalid_filter:
             return error("query must be <=1000 characters and k 1..50")
+        if base_month is not None and (
+            corp_code is None or doc_subtype is None or base_year is None
+        ):
+            return error(
+                "base_month requires corp_code, doc_subtype, and base_year"
+            )
         match = _match_query(query)
         receipts = _exact_receipts(query)
         explicit_section = _explicit_section(query) if path_hint is None else None
         if not match or receipts is None:
             return result("info_limit", [], limitations=["query has no useful token or exceeds the bounded lexical-query contract"])
+        # ``+`` prefixes keep SQLite from choosing a chunk_map column index over
+        # the FTS MATCH: with the bounded MATCH driving the plan a scoped search
+        # stays fast, whereas an index-first plan degrades by ~500x.
         where, params = ["chunks_fts MATCH ?"], [match]
         for column, value in (("m.corp_code", corp_code), ("m.doc_subtype", doc_subtype), ("m.base_year", base_year)):
             if value is not None:
-                where.append(f"{column}=?")
+                where.append(f"+{column}=?")
                 params.append(value)
+        if base_month is not None:
+            metadata = connect_ro(self.pipeline_release / "events.sqlite")
+            try:
+                month_rows = list(
+                    metadata.execute(
+                        "SELECT d.rcept_no FROM document d "
+                        "JOIN document_status ds ON ds.rcept_no=d.rcept_no "
+                        "WHERE d.corp_code=? AND d.doc_subtype=? "
+                        "AND d.base_year=? AND d.base_month=? "
+                        + ("AND ds.is_latest=1 " if latest_only else "")
+                        + "ORDER BY d.rcept_dt DESC,d.rcept_no DESC LIMIT 51",
+                        (corp_code, doc_subtype, base_year, base_month),
+                    )
+                )
+            finally:
+                metadata.close()
+            if not month_rows:
+                return result("not_found", [])
+            if len(month_rows) > 50:
+                return result(
+                    "info_limit",
+                    [],
+                    limitations=["base_month matched more than 50 filings"],
+                )
+            where.append(
+                "+m.rcept_no IN ("
+                + ",".join("?" for _ in month_rows)
+                + ")"
+            )
+            params.extend(row["rcept_no"] for row in month_rows)
         if latest_only:
-            where.append("m.is_latest=1")
+            where.append("+m.is_latest=1")
         if receipts:
             where.append(
-                "m.rcept_no IN (" + ",".join("?" for _ in receipts) + ")"
+                "+m.rcept_no IN (" + ",".join("?" for _ in receipts) + ")"
             )
             params.extend(receipts)
         if explicit_section:
-            where.append("m.path=?")
+            where.append("+m.path=?")
             params.append(explicit_section)
         elif path_hint:
-            where.append("m.path LIKE ? ESCAPE '\\'")
+            where.append("+m.path LIKE ? ESCAPE '\\'")
             params.append("%" + path_hint.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
         params.append(k + 1)
         sql = f"SELECT m.*,bm25(chunks_fts,5.0,1.0) score FROM chunks_fts JOIN chunk_map m ON m.rowid=chunks_fts.rowid WHERE {' AND '.join(where)} ORDER BY score,m.rowid LIMIT ?"
