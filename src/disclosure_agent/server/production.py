@@ -38,6 +38,11 @@ from disclosure_agent.runtime import (
     RuntimeDeadlineError,
     RuntimeIdentity,
 )
+from disclosure_agent.sources import (
+    OpenDartClient,
+    OpenDartConfig,
+    OpenDartSource,
+)
 from disclosure_agent.tool_registry import ToolRegistry
 from disclosure_agent.tools import DisclosureTools
 
@@ -144,15 +149,22 @@ class ProductionAnswerService:
         runtime: ReliableAnswerService,
         transport: _HcxTransportGateway,
         identity: RuntimeIdentity,
+        *,
+        source: object | None = None,
     ) -> None:
         self._runtime = runtime
         self._transport = transport
         self.identity = identity
+        self._source = source
 
     def answer(self, question_id: str, question: str) -> AnswerResponse:
         return self._runtime.answer(question_id, question)
 
     def close(self) -> None:
+        if self._source is not None:
+            close = getattr(self._source, "close", None)
+            if callable(close):
+                close()
         self._transport.close()
 
 
@@ -161,6 +173,7 @@ def build_production_service(
     paths: ProductionPaths,
     environ: Mapping[str, str] | None = None,
     session: object | None = None,
+    data_source: str | None = None,
 ) -> ProductionAnswerService:
     if not isinstance(paths, ProductionPaths):
         raise StartupConfigurationError("paths must be ProductionPaths")
@@ -172,24 +185,45 @@ def build_production_service(
     if not isinstance(model, str):
         raise StartupConfigurationError("HCX_MODEL differs")
 
-    pipeline = load_pipeline_snapshot(paths.pipeline_root)
-    retrieval = load_retrieval_snapshot(paths.retrieval_root, pipeline)
-    disclosure = DisclosureTools(
-        paths.pipeline_root,
-        paths.universe_csv,
-        pipeline_snapshot=pipeline,
-    )
-    index = RetrievalIndex(
-        paths.pipeline_root,
-        pipeline_snapshot=pipeline,
-        retrieval_snapshot=retrieval,
-    )
-    registry = ToolRegistry(disclosure, index)
-    if (
-        registry.lineage.pipeline_release != pipeline.release_id
-        or registry.lineage.retrieval_release != retrieval.release.name
-    ):
-        raise StartupConfigurationError("verified runtime lineage differs")
+    selected_source = data_source if data_source is not None else environment.get("DATA_SOURCE", "opendart")
+
+    opendart_source: OpenDartSource | None = None
+    if selected_source == "opendart":
+        open_dart_key = environment.get("OPEN_DART", "").strip()
+        if not open_dart_key:
+            raise StartupConfigurationError("OPEN_DART is required")
+        try:
+            opendart_config = OpenDartConfig(api_key=open_dart_key)
+        except Exception as exc:
+            raise StartupConfigurationError(f"OpenDART config invalid: {exc}") from exc
+        opendart_client = OpenDartClient(opendart_config, session=session)
+        try:
+            opendart_source = OpenDartSource(client=opendart_client)
+        except Exception:
+            opendart_client.close()
+            raise StartupConfigurationError("OpenDART company catalog could not be loaded") from None
+        registry = ToolRegistry(opendart_source, opendart_source)
+    elif selected_source == "snapshot":
+        pipeline = load_pipeline_snapshot(paths.pipeline_root)
+        retrieval = load_retrieval_snapshot(paths.retrieval_root, pipeline)
+        disclosure = DisclosureTools(
+            paths.pipeline_root,
+            paths.universe_csv,
+            pipeline_snapshot=pipeline,
+        )
+        index = RetrievalIndex(
+            paths.pipeline_root,
+            pipeline_snapshot=pipeline,
+            retrieval_snapshot=retrieval,
+        )
+        registry = ToolRegistry(disclosure, index)
+        if (
+            registry.lineage.pipeline_release != pipeline.release_id
+            or registry.lineage.retrieval_release != retrieval.release.name
+        ):
+            raise StartupConfigurationError("verified runtime lineage differs")
+    else:
+        raise StartupConfigurationError(f"unknown data_source: {selected_source}")
 
     transport = _HcxTransportGateway(
         api_key=api_key,
@@ -220,7 +254,12 @@ def build_production_service(
         identity=identity,
         config=runtime_config,
     )
-    return ProductionAnswerService(runtime, transport, identity)
+    return ProductionAnswerService(
+        runtime,
+        transport,
+        identity,
+        source=opendart_source,
+    )
 
 
 __all__ = [

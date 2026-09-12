@@ -96,9 +96,14 @@ def _strip_trailing_josa(token: str) -> str:
 
 
 class CompanyResolver:
-    def __init__(self, universe_csv: Path | str):
-        with Path(universe_csv).open(encoding="utf-8-sig", newline="") as handle:
-            self._rows = tuple(csv.DictReader(handle))
+    def __init__(self, universe_csv: Path | str | None = None, *, rows: tuple[dict[str, str], ...] | None = None):
+        if rows is not None:
+            self._rows = rows
+        elif universe_csv is not None:
+            with Path(universe_csv).open(encoding="utf-8-sig", newline="") as handle:
+                self._rows = tuple(csv.DictReader(handle))
+        else:
+            self._rows = ()
         aliases: dict[str, list[dict[str, str]]] = defaultdict(list)
         codes: dict[str, dict[str, str]] = {}
         def add_alias(key: str, row: dict[str, str]) -> None:
@@ -107,7 +112,9 @@ class CompanyResolver:
 
         for row in self._rows:
             for field in ("corp_code", "stock_code"):
-                codes[_normalize(row[field])] = row
+                norm = _normalize(row.get(field, ""))
+                if norm:
+                    codes[norm] = row
             for field in ("corp_code", "stock_code", "corp_name", "listed_name", "corp_eng_name"):
                 add_alias(_normalize(row.get(field, "")), row)
             # English legal name with structural suffixes removed

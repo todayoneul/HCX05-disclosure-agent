@@ -5,6 +5,10 @@
 HyperCLOVA X(HCX-005)는 복합 질의의 오케스트레이션을 담당하고, 수치 조회·계산·근거
 검증은 결정적 도구와 Python `Decimal` 기반 로직으로 처리합니다.
 
+> `codex/opendart-data-source` 브랜치는 기존 비공개 코퍼스와 SQLite/FTS 산출물 대신
+> 금융감독원 OpenDART API를 기본 데이터 소스로 사용합니다. 자세한 설정과 제약은
+> [OpenDART 운영 안내](docs/codex/OPENDART_DATA_SOURCE_IMPLEMENTATION.md)를 참고하세요.
+
 이 저장소는 공개 가능한 애플리케이션 소스와 서빙 계약을 제공합니다. 주최 측 제공 원본
 코퍼스, 생성된 SQLite/FTS 인덱스, 운영 산출물, 평가 케이스와 자격 증명은 저장소에
 포함하지 않습니다.

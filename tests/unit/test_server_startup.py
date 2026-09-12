@@ -121,6 +121,7 @@ def test_startup_binds_one_verified_pipeline_and_retrieval_snapshot(
     service = build_production_service(
         paths=paths,
         environ={"HCX_API_KEY": "fixture-key"},
+        data_source="snapshot",
         session=session,
     )
 

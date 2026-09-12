@@ -19,17 +19,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 def build_service_from_environment(
     root: Path | str = PROJECT_ROOT,
+    *,
+    data_source: str | None = None,
 ) -> ProductionAnswerService:
     resolved_root = Path(root).resolve()
     load_dotenv(resolved_root / ".env", override=False)
-    return build_production_service(paths=ProductionPaths.from_root(resolved_root))
+    kwargs = {"data_source": data_source} if data_source is not None else {}
+    return build_production_service(
+        paths=ProductionPaths.from_root(resolved_root),
+        **kwargs,
+    )
 
 
 app = create_app(
     build_service_from_environment,
     config=ServerConfig(
-        pipeline_release="startup-verified",
-        retrieval_release="startup-verified",
+        pipeline_release="opendart-runtime",
+        retrieval_release="opendart-runtime",
     ),
 )
 
