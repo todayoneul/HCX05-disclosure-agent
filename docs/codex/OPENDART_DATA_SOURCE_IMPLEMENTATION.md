@@ -37,7 +37,8 @@ PYTHONPATH=src .venv/bin/python -m uvicorn disclosure_agent.server.main:app --ho
    - 키가 누락되었거나 공백인 경우, 서버 시작 시 즉시 `StartupConfigurationError("OPEN_DART is required")`를 발생시키며 중단됩니다. 레거시 스냅샷으로의 묵시적 폴백은 발생하지 않습니다.
 3. **API 기반 기업 카탈로그**:
    - 프로덕션 환경에서는 레거시 `universe.csv` 파일에 의존하지 않고 OpenDART의 `/api/corpCode.xml` API를 통해 전체 법인 고유번호 목록을 동적으로 로드합니다.
-   - 카탈로그 수신 실패나 빈 결과에서는 StartupConfigurationError로 시작을 중단합니다. 빈 매핑이나 기존 CSV로 대체하지 않습니다.
+   - 전체 카탈로그는 첫 회사명 조회 시 지연 로딩합니다. 따라서 원격 ZIP 응답이 느려도 서버 시작과 `corp_code`를 직접 지정한 공시 조회는 영향을 받지 않습니다.
+   - 카탈로그 수신 실패는 해당 도구 호출의 안전한 오류로 반환하며, 빈 매핑이나 기존 CSV로 대체하지 않습니다.
 4. **정정/최신 접수번호 계보 계약 (Lineage Contracts)**:
    - 일반 공시: `root_rcept_no = latest_rcept_no = rcept_no`, `correction_status = "original"`.
    - 정정 공시: OpenDART `list.json`은 원본 접수번호를 직접 제공하지 않으므로, 기존 링커와 같이 현재 접수번호를 로컬 체인 기준점(`root_rcept_no = latest_rcept_no = rcept_no`)으로 사용하고 `correction_status = "unresolved_external_root"`로 표기합니다. 이는 외부 원본을 확인했다는 뜻이 아닙니다. `is_latest`는 최종보고서 조회 결과에만 적용됩니다.
@@ -60,7 +61,9 @@ OpenDART API의 메타데이터 제공 한계에 따라 다음 질의는 안전�
 
 ## 5. 실환경 연동 확인 메모
 - `.env`의 `OPEN_DART`로 `/api/list.json`에 삼성전자(00126380)의 2025년 3월 공시 1건을 요청해 정상 코드 `000`과 1건의 응답을 확인했습니다.
-- 전체 기업 목록 `/api/corpCode.xml` 로딩은 첫 확인에서 110초 이상 완료되지 않아 자체 종료했고, 후속 확인도 55초 제한에 도달했습니다. 실제 전체 카탈로그 로딩 및 서버 시작 성공은 아직 확인하지 못했습니다. 모의 응답 기반 시작·조회 테스트와 구분합니다.
+- 같은 접수번호로 `/api/document.xml` 원문 ZIP을 내려받아 섹션 1개를 파싱하고 본문 256자를 읽었습니다.
+- 실제 `.env`로 별도 로컬 포트 8001에 서버를 시작했고 `/healthz`가 HTTP 200과 `opendart-runtime` 릴리스 두 개를 반환했습니다.
+- 전체 기업 목록 `/api/corpCode.xml` 로딩은 첫 확인에서 110초 이상 완료되지 않아 자체 종료했고, 후속 확인도 55초 제한에 도달했습니다. 이 때문에 카탈로그를 지연 로딩하도록 바꿨으며, 회사명 기반 첫 요청에서는 원격 응답 시간의 영향을 받을 수 있습니다.
 - 이 과정에서 HCX 모델 API나 외부 유료 리소스 호출은 전혀 발생하지 않았습니다.
 
 ---

@@ -474,12 +474,14 @@ class OpenDartSource:
             raise ValueError("runtime_identity must be a path-safe non-empty string")
         self.client = client
         if universe_csv is not None and Path(universe_csv).is_file():
-            self.company_resolver = CompanyResolver(universe_csv)
+            self.company_resolver: CompanyResolver | None = CompanyResolver(universe_csv)
+            self._company_catalog_loaded = True
         else:
-            rows = client.corp_codes()
-            if not rows:
-                raise OpenDartNotFound("OpenDART company catalog is empty")
-            self.company_resolver = CompanyResolver(rows=tuple(rows))
+            # The complete corpCode.xml response can be slow. Keep startup and
+            # corp-code queries available, and fetch it only when a name must
+            # be resolved. The data still comes exclusively from OpenDART.
+            self.company_resolver = None
+            self._company_catalog_loaded = False
         self.release = Path(runtime_identity)
         self.pipeline_release = self.release
         self._documents: OrderedDict[str, _Document] = OrderedDict()
@@ -489,6 +491,21 @@ class OpenDartSource:
         self.client.close()
 
     def resolve_company(self, query: str) -> dict:
+        if not self._company_catalog_loaded:
+            try:
+                rows = self.client.corp_codes()
+            except OpenDartError as exc:
+                return self._failure(exc)
+            self._company_catalog_loaded = True
+            if rows:
+                self.company_resolver = CompanyResolver(rows=tuple(rows))
+        if self.company_resolver is None:
+            return _source_result(
+                "not_found",
+                [],
+                limitations=["OpenDART company catalog returned no companies"],
+                endpoint="/corpCode.xml",
+            )
         return self.company_resolver.resolve_company(query)
 
     def resolve_sector(self, query: str) -> dict:

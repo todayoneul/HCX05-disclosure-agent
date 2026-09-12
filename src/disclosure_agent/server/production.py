@@ -197,11 +197,7 @@ def build_production_service(
         except Exception as exc:
             raise StartupConfigurationError(f"OpenDART config invalid: {exc}") from exc
         opendart_client = OpenDartClient(opendart_config, session=session)
-        try:
-            opendart_source = OpenDartSource(client=opendart_client)
-        except Exception:
-            opendart_client.close()
-            raise StartupConfigurationError("OpenDART company catalog could not be loaded") from None
+        opendart_source = OpenDartSource(client=opendart_client)
         registry = ToolRegistry(opendart_source, opendart_source)
     elif selected_source == "snapshot":
         pipeline = load_pipeline_snapshot(paths.pipeline_root)

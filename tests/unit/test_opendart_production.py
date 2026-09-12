@@ -138,18 +138,11 @@ def test_opendart_startup_uses_api_source_without_legacy_csv(
     assert session.close_calls >= 1
 
 
-def test_opendart_catalog_startup_failure_is_safe_and_never_loads_snapshot(
+def test_opendart_startup_does_not_wait_for_company_catalog_or_load_snapshot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import disclosure_agent.server.production as production
 
-    monkeypatch.setattr(
-        production,
-        "OpenDartSource",
-        lambda **kwargs: (_ for _ in ()).throw(
-            RuntimeError("synthetic catalog failure")
-        ),
-    )
     monkeypatch.setattr(
         production,
         "load_pipeline_snapshot",
@@ -158,14 +151,17 @@ def test_opendart_catalog_startup_failure_is_safe_and_never_loads_snapshot(
         ),
     )
 
-    with pytest.raises(
-        StartupConfigurationError, match="company catalog could not be loaded"
-    ):
-        build_production_service(
-            paths=_paths(tmp_path, legacy_snapshot=True),
-            environ={
-                "HCX_API_KEY": "fixture-hcx",
-                "OPEN_DART": "fixture-open-dart",
-            },
-            session=NoNetworkSession(),
-        )
+    session = NoNetworkSession()
+    service = build_production_service(
+        paths=_paths(tmp_path, legacy_snapshot=True),
+        environ={
+            "HCX_API_KEY": "fixture-hcx",
+            "OPEN_DART": "fixture-open-dart",
+        },
+        session=session,
+    )
+    try:
+        assert service.identity.lineage.pipeline_release == "opendart-runtime"
+        assert session.get_calls == 0
+    finally:
+        service.close()

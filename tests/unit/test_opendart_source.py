@@ -457,23 +457,33 @@ def test_unknown_receipt_does_not_return_invented_blank_metadata(
     assert response["citations"] == []
 
 
-def test_empty_or_failed_api_catalog_fails_closed_without_empty_resolver(
+def test_api_catalog_is_lazy_and_failures_stay_inside_tool_boundary(
     tmp_path: Path,
 ) -> None:
     empty_client = StubOpenDartClient(corp_rows=[])
-    with pytest.raises(OpenDartNotFound):
-        OpenDartSource(
-            empty_client, universe_csv=tmp_path / "missing-empty.csv"
-        )
+    empty_source = OpenDartSource(
+        empty_client, universe_csv=tmp_path / "missing-empty.csv"
+    )
+    assert empty_client.corp_codes_calls == 0
+    empty_result = empty_source.resolve_company("삼성전자")
+    assert empty_result["status"] == "not_found"
+    assert empty_client.corp_codes_calls == 1
+    empty_source.resolve_company("삼성전자")
+    assert empty_client.corp_codes_calls == 1
 
     class FailedCatalogClient(StubOpenDartClient):
         def corp_codes(self) -> list[dict[str, str]]:
             raise OpenDartTransportError("/corpCode.xml", 503)
 
-    with pytest.raises(OpenDartTransportError):
-        OpenDartSource(
-            FailedCatalogClient(), universe_csv=tmp_path / "missing-failed.csv"
-        )
+    failed_client = FailedCatalogClient()
+    failed_source = OpenDartSource(
+        failed_client, universe_csv=tmp_path / "missing-failed.csv"
+    )
+    failed_result = failed_source.resolve_company("삼성전자")
+    assert failed_result["status"] == "error"
+    assert failed_result["limitations"] == [
+        "OpenDART transport failure at /corpCode.xml HTTP 503"
+    ]
 
 
 def test_partial_section_read_keeps_partial_chunk_as_next_part(

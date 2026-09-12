@@ -5,9 +5,45 @@
 HyperCLOVA X(HCX-005)는 복합 질의의 오케스트레이션을 담당하고, 수치 조회·계산·근거
 검증은 결정적 도구와 Python `Decimal` 기반 로직으로 처리합니다.
 
-> `codex/opendart-data-source` 브랜치는 기존 비공개 코퍼스와 SQLite/FTS 산출물 대신
-> 금융감독원 OpenDART API를 기본 데이터 소스로 사용합니다. 자세한 설정과 제약은
-> [OpenDART 운영 안내](docs/codex/OPENDART_DATA_SOURCE_IMPLEMENTATION.md)를 참고하세요.
+이 브랜치(`codex/opendart-data-source`)는 금융감독원 **OpenDART API**를 기본 데이터
+소스로 사용합니다. 기존 대회 코퍼스나 SQLite/FTS 산출물이 없어도 서버가 시작되며,
+공시 목록과 원문은 요청 시 OpenDART에서 조회합니다. 회사명 조회에 필요한 전체 법인
+목록은 첫 회사명 질의 때 지연 로딩하므로 서버 시작을 막지 않습니다.
+
+## OpenDART 빠른 시작
+
+Python 3.13 환경에서 의존성을 설치한 다음 `.env.example`을 복사해 두 키를 설정합니다.
+
+```sh
+cp .env.example .env
+# OPEN_DART=<OpenDART API 인증키>
+# HCX_API_KEY=<HyperCLOVA X API 인증키>
+```
+
+NCloud/HCX 요청은 `HCX_API_KEY`만 사용합니다. `HCX_API_KEY_SUBMIT`은 읽거나 대체 키로
+사용하지 않습니다. `.env`는 Git에서 제외됩니다.
+
+```sh
+PYTHONPATH=src .venv/bin/python -m uvicorn \
+  disclosure_agent.server.main:app --host 127.0.0.1 --port 8001
+
+curl -s http://127.0.0.1:8001/healthz
+```
+
+정상 상태에서는 `pipeline_release`와 `retrieval_release`가 모두
+`opendart-runtime`으로 표시됩니다. 현재 구현은 공시 목록·원문·회사 식별을 API로
+제공하며, OpenDART 메타데이터에 없는 업종 분류, 구조화된 이벤트 금액/발생일,
+검증된 정정 계보는 `info_limit`로 응답합니다. 실행 계약과 검증 결과는
+[OpenDART 운영 안내](docs/codex/OPENDART_DATA_SOURCE_IMPLEMENTATION.md)에 정리했습니다.
+
+실환경 스모크에서는 서버 시작과 `/healthz` 200 응답, 공시 목록 1건 조회, 해당
+접수번호의 원문 ZIP 다운로드, 섹션 파싱 및 본문 읽기까지 확인했습니다. 이 과정에서
+HCX 모델 호출은 실행하지 않았습니다.
+
+```sh
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/unit/test_opendart_source.py tests/unit/test_opendart_production.py
+```
 
 이 저장소는 공개 가능한 애플리케이션 소스와 서빙 계약을 제공합니다. 주최 측 제공 원본
 코퍼스, 생성된 SQLite/FTS 인덱스, 운영 산출물, 평가 케이스와 자격 증명은 저장소에
@@ -15,8 +51,7 @@ HyperCLOVA X(HCX-005)는 복합 질의의 오케스트레이션을 담당하고,
 
 <table>
 <tr>
-<td align="center"><b>70</b><br><sub>대상 기업</sub></td>
-<td align="center"><b>4,204</b><br><sub>공시 문서</sub></td>
+<td align="center"><b>OpenDART</b><br><sub>실시간 공시 데이터</sub></td>
 <td align="center"><b>9</b><br><sub>결정적 도구</sub></td>
 <td align="center"><b>270 s</b><br><sub>내부 hard deadline</sub></td>
 <td align="center"><b>1</b><br><sub>FastAPI worker</sub></td>
@@ -66,32 +101,32 @@ flowchart TB
         P --> D
     end
 
-    subgraph Data[불변 데이터 계층]
-        DB[pipeline-v1 SQLite]
-        FTS[retrieval-v1 FTS5 unicode61]
-        L[정정 공시 계보]
+    subgraph Data[OpenDART 데이터 계층]
+        CAT[corpCode.xml 회사 목록]
+        LIST[list.json 공시 목록]
+        DOC[document.xml 공시 원문]
     end
 
-    D --> DB
-    D --> FTS
-    D --> L
+    D --> CAT
+    D --> LIST
+    D --> DOC
     C --> V[사후 근거·수치·인용 검증]
     V -- 실패 --> X
     V -- 통과 --> A[답변 직렬화]
     A --> API[FastAPI GET /answer]
 ```
 
-데이터 계층은 운영 환경에서 별도로 복원되는 불변 릴리즈입니다. 애플리케이션은 원본
-코퍼스를 직접 공개하거나 수정하지 않고, 검증된 SQLite 메타데이터와 FTS5 색인에
-읽기 전용으로 접근합니다.
+데이터 계층은 OpenDART API에 읽기 전용으로 접근합니다. 회사 목록은 회사명 식별이
+필요한 첫 요청에서만 내려받고, 공시 목록과 원문은 질의 범위에 맞춰 요청 시 조회합니다.
+별도의 코퍼스나 SQLite/FTS 릴리즈를 복원할 필요가 없습니다.
 
 ## 주요 처리 흐름
 
 1. 질문의 길이·제어문자·공시 범위를 검증합니다.
 2. 기업명, 영문명, 종목코드, 과거 사명을 DART 기업 식별자로 정규화합니다.
 3. 정형 질의는 결정적 도구로 직접 처리하고, 복합 질의는 유계 HCX 플래너로 라우팅합니다.
-4. 정정 공시 계보와 기준연도·연결/별도 기준을 확인합니다.
-5. 원문 섹션과 검색 청크를 컨텍스트로 패킹하고, 필요한 수치는 `Decimal`로 계산합니다.
+4. OpenDART 공시 목록에서 기준연도와 보고서 유형을 확인합니다.
+5. 내려받은 원문 섹션과 검색 청크를 컨텍스트로 패킹하고, 필요한 수치는 `Decimal`로 계산합니다.
 6. 답변의 수치·단위·인용 접수번호를 검증한 뒤 API 응답으로 직렬화합니다.
 
 ## API 계약
@@ -121,7 +156,7 @@ GET /answer?question_id={id}&question={URL-encoded question}
 
 ```sh
 cp .env.example .env
-# .env에 HCX_API_KEY를 로컬에서 설정
+# .env에 OPEN_DART와 HCX_API_KEY를 로컬에서 설정
 
 uv sync --locked --extra dev
 uv lock --check
@@ -138,9 +173,9 @@ curl -G http://127.0.0.1:8080/answer \
   --data-urlencode "question=삼성전자 2024년 연결 매출액을 알려 주세요."
 ```
 
-원본 데이터와 운영 릴리즈가 없는 공개 소스 체크아웃에서는 코드·계약 테스트와 컨테이너
-구성 검증을 수행할 수 있습니다. 실제 `/healthz` 및 `/answer` 실행에는 운영 환경에서
-검증된 데이터 릴리즈와 로컬 `.env`가 필요합니다.
+공개 소스 체크아웃만으로 코드·계약 테스트와 컨테이너 구성 검증을 수행할 수 있습니다.
+실제 `/healthz` 및 `/answer` 실행에는 `OPEN_DART`와 `HCX_API_KEY`를 설정한 로컬
+`.env`가 필요하며, 별도의 데이터 릴리즈는 필요하지 않습니다.
 
 ## 검증 기준
 
@@ -148,15 +183,16 @@ curl -G http://127.0.0.1:8080/answer \
 |---|---|
 | Python | 3.13.11, `uv.lock` 고정 |
 | 모델 | HyperCLOVA X HCX-005 native v3 |
-| 검색 | SQLite FTS5 `unicode61` 어휘 색인 |
+| 검색 | OpenDART 원문 기반 유계 어휘 검색 |
 | 서빙 | FastAPI + Uvicorn, worker 1개 |
 | 컨테이너 | non-root 실행, read-only root filesystem, `/tmp` tmpfs |
 | 계산 | Python `Decimal` 기반 결정적 연산 |
 | 평가 계약 | 순차 호출, 내부 hard deadline 270초, 성공 시 5개 문자열 필드 |
-| 최신 런타임 기준 | `195808c9a777d6b4dd9749cb09eb46feabfad508` |
+| 데이터 릴리즈 식별자 | `opendart-runtime` |
 
-제공 코퍼스 기반 검증은 데이터 릴리즈를 복원한 실행 환경에서 수행하며, 공개 저장소의
-기본 테스트는 모델 API를 호출하지 않습니다.
+기본 테스트는 OpenDART와 모델 API를 호출하지 않는 오프라인 테스트입니다. 실환경
+스모크 테스트는 OpenDART 공시 목록·원문 조회와 `/healthz`까지 별도로 확인하며,
+HCX 모델은 호출하지 않습니다.
 
 ## 저장소 구조
 
@@ -166,9 +202,10 @@ src/disclosure_agent/
 ├── context/        # 컨텍스트 패킹
 ├── corrections/    # 정정 공시 계보 추적
 ├── hcx/            # HyperCLOVA X 클라이언트와 계약
-├── retrieval/      # SQLite FTS5 검색
+├── retrieval/      # 검색 인터페이스와 결과 계약
 ├── runtime/        # 예산·재시도·서비스 런타임
 ├── server/         # FastAPI 애플리케이션
+├── sources/        # OpenDART API 데이터 소스
 └── tools/          # 회사·이벤트·공시·계산 도구
 
 pipeline/            # 데이터 처리 및 릴리즈 빌드 로직
