@@ -13,6 +13,10 @@ from disclosure_agent.agent.validator import _valid_evidence_citation
 from disclosure_agent.sources.opendart import (
     OpenDartClient,
     OpenDartConfig,
+    OpenDartApiError,
+    OpenDartAuthError,
+    OpenDartQuotaError,
+    OpenDartServiceError,
     OpenDartMalformedResponse,
     OpenDartNotFound,
     OpenDartTransportError,
@@ -567,3 +571,362 @@ def test_malformed_document_archive_is_reported_without_raw_body(
     assert response["status"] == "error"
     assert response["data"] == {}
     assert response["limitations"] == ["OpenDART response shape is invalid"]
+
+
+def test_opendart_xml_title_atoc_hierarchy_and_table_markdown_preserved(
+    tmp_path: Path,
+) -> None:
+    receipt = "20240301000001"
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<DOCUMENT>"
+        '<TITLE ATOC="Y">Ⅰ. 회사의 개요</TITLE>'
+        "<P>회사의 기본 정보입니다.</P>"
+        '<TITLE ATOC="Y">1. 회사의 법적ㆍ상업적 명칭</TITLE>'
+        "<P>주식회사 현대자동차</P>"
+        '<TITLE ATOC="Y">Ⅱ. 사업의 내용</TITLE>'
+        '<TABLE unit="백만원">'
+        "<CAPTION>주요 제품 및 매출 (단위: 백만원)</CAPTION>"
+        "<TR>"
+        '<TH rowspan="2">사업부문</TH>'
+        '<TH colspan="2">매출액</TH>'
+        "</TR>"
+        "<TR>"
+        "<TH>국내</TH><TH>해외</TH>"
+        "</TR>"
+        "<TR>"
+        "<TD>차량</TD><TD>10,000</TD><TD>20,000</TD>"
+        "</TR>"
+        "</TABLE>"
+        "</DOCUMENT>"
+    ).encode("utf-8")
+
+    attachment_xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<DOCUMENT>"
+        '<TITLE ATOC="Y">1. 감사보고서</TITLE>'
+        "<P>적정의견</P>"
+        "</DOCUMENT>"
+    ).encode("utf-8")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr(f"{receipt}.xml", xml)
+        handle.writestr("02_attachment.xml", attachment_xml)
+
+    client = StubOpenDartClient(
+        payloads=[_list_payload([_filing_row(receipt)])],
+        documents={receipt: archive.getvalue()},
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    sections = source.list_sections(doc_id=f"opendart-{receipt}")
+    assert sections["status"] == "ok"
+    paths = [s["path"] for s in sections["data"]]
+    assert "Ⅰ. 회사의 개요" in paths
+    assert "Ⅰ. 회사의 개요 > 1. 회사의 법적ㆍ상업적 명칭" in paths
+    assert "Ⅱ. 사업의 내용" in paths
+    assert any("[attachment]" in p for p in paths)
+
+    read_res = source.read_section(doc_id=f"opendart-{receipt}", path="Ⅱ. 사업의 내용")
+    assert read_res["status"] == "ok"
+    assert "| 사업부문 | 매출액 | 매출액 |" in read_res["data"]["text"]
+
+
+def test_duplicate_section_paths_are_disambiguated_for_read_section(
+    tmp_path: Path,
+) -> None:
+    receipt = "20240301000001"
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<DOCUMENT>"
+        '<TITLE ATOC="Y">1. 개요</TITLE>'
+        "<P>첫 번째 본문 개요입니다.</P>"
+        '<TITLE ATOC="Y">1. 개요</TITLE>'
+        "<P>두 번째 중복 개요입니다.</P>"
+        "</DOCUMENT>"
+    ).encode("utf-8")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr(f"{receipt}.xml", xml)
+
+    client = StubOpenDartClient(
+        payloads=[_list_payload([_filing_row(receipt)])],
+        documents={receipt: archive.getvalue()},
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    sections = source.list_sections(doc_id=f"opendart-{receipt}")
+    assert sections["status"] == "ok"
+    paths = [s["path"] for s in sections["data"]]
+    assert len(paths) == 2
+    assert paths[0] == "1. 개요"
+    assert paths[1] == "1. 개요 (2)"
+
+    first_read = source.read_section(doc_id=f"opendart-{receipt}", path="1. 개요")
+    assert first_read["status"] == "ok"
+    assert "첫 번째 본문 개요입니다." in first_read["data"]["text"]
+
+    second_read = source.read_section(doc_id=f"opendart-{receipt}", path="1. 개요 (2)")
+    assert second_read["status"] == "ok"
+    assert "두 번째 중복 개요입니다." in second_read["data"]["text"]
+
+
+def test_search_chunks_bounds_candidate_downloads_and_pins_local_documents(
+    tmp_path: Path,
+) -> None:
+    n_candidates = 25
+    receipts = [f"202403010000{i:02d}" for i in range(1, n_candidates + 1)]
+    filing_rows = [
+        _filing_row(
+            rcp,
+            report_nm=f"사업보고서 (202{i % 4}.12)",
+            rcept_dt=f"202403{i:02d}",
+        )
+        for i, rcp in enumerate(receipts, start=1)
+    ]
+
+    documents = {}
+    for i, rcp in enumerate(receipts, start=1):
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            "<DOCUMENT>"
+            '<TITLE ATOC="Y">사업의 내용</TITLE>'
+            f"<P>현대자동차 전기차 배터리 핵심기술 공시 {i}번 내용입니다.</P>"
+            "</DOCUMENT>"
+        ).encode("utf-8")
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+            handle.writestr(f"{rcp}.xml", xml)
+        documents[rcp] = archive.getvalue()
+
+    client = StubOpenDartClient(
+        payloads=[_list_payload(filing_rows), _list_payload(filing_rows)],
+        documents=documents,
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    result = source.search_chunks(
+        "배터리 핵심기술",
+        corp_code="001",
+        latest_only=True,
+        k=10,
+    )
+
+    assert result["status"] == "ok"
+    assert len(result["data"]) > 0
+    assert len(client.document_calls) <= 5
+    assert len(client.document_calls) == len(set(client.document_calls))
+    assert "OpenDART candidate retrieval was bounded" in result["limitations"]
+    for item in result["data"]:
+        assert item["doc_id"].startswith("opendart-")
+        assert "배터리" in item["text"]
+        assert _valid_evidence_citation(item["citation"])
+
+
+def test_search_chunks_reuses_cached_documents_without_counting_against_download_bound(
+    tmp_path: Path,
+) -> None:
+    n_candidates = 22
+    receipts = [f"202404010000{i:02d}" for i in range(1, n_candidates + 1)]
+    filing_rows = [
+        _filing_row(
+            rcp,
+            report_nm="사업보고서 (2023.12)",
+            rcept_dt=f"202404{i:02d}",
+        )
+        for i, rcp in enumerate(receipts, start=1)
+    ]
+
+    documents = {}
+    for i, rcp in enumerate(receipts, start=1):
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            "<DOCUMENT>"
+            '<TITLE ATOC="Y">사업의 개요</TITLE>'
+            f"<P>현대자동차 로보틱스 자율주행 연구 {i}번 정보입니다.</P>"
+            "</DOCUMENT>"
+        ).encode("utf-8")
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+            handle.writestr(f"{rcp}.xml", xml)
+        documents[rcp] = archive.getvalue()
+
+    client = StubOpenDartClient(
+        payloads=[_list_payload(filing_rows), _list_payload(filing_rows)],
+        documents=documents,
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    cached_receipt = receipts[-1]
+    _ = source.list_sections(doc_id=f"opendart-{cached_receipt}")
+    initial_downloads = list(client.document_calls)
+    assert len(initial_downloads) == 1
+    assert initial_downloads[0] == cached_receipt
+
+    result = source.search_chunks(
+        "로보틱스 자율주행",
+        corp_code="001",
+        latest_only=True,
+        k=10,
+    )
+
+    assert result["status"] == "ok"
+    search_downloads = client.document_calls[len(initial_downloads):]
+    assert len(search_downloads) <= 5
+    assert cached_receipt not in search_downloads
+    assert len(search_downloads) == len(set(search_downloads))
+
+
+def test_opendart_client_typed_exceptions_for_status_codes_and_secret_redaction() -> None:
+    secret = "secret-key-xyz-987"
+    config = OpenDartConfig(api_key=secret)
+
+    # 1. client.json mappings
+    # 010/011/012 -> OpenDartAuthError
+    for status in ("010", "011", "012"):
+        session = QueueSession([FakeResponse(f'{{"status": "{status}", "message": "auth error with {secret}"}}'.encode())])
+        client = OpenDartClient(config, session=session)
+        with pytest.raises(OpenDartAuthError) as exc_info:
+            client.json("/list.json", {})
+        assert exc_info.value.error_code == "auth_error"
+        assert secret not in str(exc_info.value)
+        assert secret not in exc_info.value.safe_message
+
+    # 020/021 -> OpenDartQuotaError
+    for status in ("020", "021"):
+        session = QueueSession([FakeResponse(f'{{"status": "{status}", "message": "quota error with {secret}"}}'.encode())])
+        client = OpenDartClient(config, session=session)
+        with pytest.raises(OpenDartQuotaError) as exc_info:
+            client.json("/list.json", {})
+        assert exc_info.value.error_code == "quota_error"
+        assert secret not in str(exc_info.value)
+
+    # 800 -> OpenDartServiceError
+    session = QueueSession([FakeResponse(f'{{"status": "800", "message": "maintenance with {secret}"}}'.encode())])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartServiceError) as exc_info:
+        client.json("/list.json", {})
+    assert exc_info.value.error_code == "service_error"
+    assert secret not in str(exc_info.value)
+
+    # 900 -> generic OpenDartApiError
+    session = QueueSession([FakeResponse(f'{{"status": "900", "message": "api error with {secret}"}}'.encode())])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartApiError) as exc_info:
+        client.json("/list.json", {})
+    assert exc_info.value.error_code == "api_error"
+    assert secret not in str(exc_info.value)
+
+    # 013/014 -> legitimate no data
+    for status in ("013", "014"):
+        session = QueueSession([FakeResponse(f'{{"status": "{status}", "message": "no data"}}'.encode())])
+        client = OpenDartClient(config, session=session)
+        res = client.json("/list.json", {})
+        assert res["status"] == status
+
+    # 2. client.document_zip mappings
+    # JSON auth error
+    session = QueueSession([FakeResponse(f'{{"status": "010", "message": "key error {secret}"}}'.encode())])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartAuthError) as exc_info:
+        client.document_zip("20240301000001")
+    assert exc_info.value.error_code == "auth_error"
+    assert secret not in str(exc_info.value)
+
+    # XML quota error
+    session = QueueSession([FakeResponse(f'<result><status>020</status><message>quota {secret}</message></result>'.encode())])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartQuotaError) as exc_info:
+        client.document_zip("20240301000001")
+    assert exc_info.value.error_code == "quota_error"
+    assert secret not in str(exc_info.value)
+
+    # XML 800 maintenance error
+    session = QueueSession([FakeResponse(b'<result><status>800</status><message>maint</message></result>')])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartServiceError) as exc_info:
+        client.document_zip("20240301000001")
+    assert exc_info.value.error_code == "service_error"
+
+    # 013/014 in document_zip -> OpenDartNotFound
+    for status in ("013", "014"):
+        session = QueueSession([FakeResponse(f'<result><status>{status}</status></result>'.encode())])
+        client = OpenDartClient(config, session=session)
+        with pytest.raises(OpenDartNotFound):
+            client.document_zip("20240301000001")
+
+    # 3. client.corp_codes mappings
+    # JSON auth error
+    session = QueueSession([FakeResponse(b'{"status": "011", "message": "disabled key"}')])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartAuthError) as exc_info:
+        client.corp_codes()
+    assert exc_info.value.error_code == "auth_error"
+
+    # XML quota error
+    session = QueueSession([FakeResponse(b'<result><status>021</status></result>')])
+    client = OpenDartClient(config, session=session)
+    with pytest.raises(OpenDartQuotaError) as exc_info:
+        client.corp_codes()
+    assert exc_info.value.error_code == "quota_error"
+
+    # 013 in corp_codes -> returns empty list
+    session = QueueSession([FakeResponse(b'<result><status>013</status></result>')])
+    client = OpenDartClient(config, session=session)
+    assert client.corp_codes() == []
+
+
+def test_source_failures_include_explicit_error_code(tmp_path: Path) -> None:
+    client = StubOpenDartClient()
+    source = _source_with_universe(client, tmp_path)
+
+    # Check _failure produces allowlisted error_code
+    auth_err = OpenDartAuthError("/list.json", "010")
+    res = source._failure(auth_err)
+    assert res["status"] == "error"
+    assert res["error_code"] == "auth_error"
+    assert "OpenDART authentication failure (010)" in res["limitations"][0]
+
+    quota_err = OpenDartQuotaError("/list.json", "020")
+    res = source._failure(quota_err)
+    assert res["status"] == "error"
+    assert res["error_code"] == "quota_error"
+
+    service_err = OpenDartServiceError("/list.json", "800")
+    res = source._failure(service_err)
+    assert res["status"] == "error"
+    assert res["error_code"] == "service_error"
+
+    transport_err = OpenDartTransportError("/list.json", 503)
+    res = source._failure(transport_err)
+    assert res["status"] == "error"
+    assert res["error_code"] == "transport_error"
+
+    malformed_err = OpenDartMalformedResponse("/document.xml")
+    res = source._failure(malformed_err)
+    assert res["status"] == "error"
+    assert res["error_code"] == "malformed_response"
+
+
+def test_search_chunks_propagates_resolve_company_backend_error(tmp_path: Path) -> None:
+    class FailingCatalogClient(StubOpenDartClient):
+        def corp_codes(self) -> list[dict[str, str]]:
+            raise OpenDartAuthError("/corpCode.xml", "010")
+
+    client = FailingCatalogClient()
+    source = OpenDartSource(client)
+
+    res = source.search_chunks("배터리 신기술")
+    assert res["status"] == "error"
+    assert res.get("error_code") == "auth_error"
+    assert "live OpenDART retrieval" not in res.get("limitations", [""])[0]
+
+    class TransportCatalogClient(StubOpenDartClient):
+        def corp_codes(self) -> list[dict[str, str]]:
+            raise OpenDartTransportError("/corpCode.xml", 502)
+    source_transport = OpenDartSource(TransportCatalogClient())
+    res_trans = source_transport.search_chunks("배터리 신기술")
+    assert res_trans["status"] == "error"
+    assert res_trans.get("error_code") == "transport_error"

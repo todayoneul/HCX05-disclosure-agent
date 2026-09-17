@@ -27,6 +27,7 @@ import requests
 
 from disclosure_agent.tools.common import result
 from disclosure_agent.tools.companies import CompanyResolver
+from disclosure_agent.parsing.periodic import parse_periodic_source
 
 
 _API_ROOT = "https://opendart.fss.or.kr/api"
@@ -57,6 +58,7 @@ _DETAIL_BY_SUBTYPE = {
 _SUBTYPE_BY_DETAIL = {value: key for key, value in _DETAIL_BY_SUBTYPE.items()}
 _MAX_CHUNK_CHARS = 8_000
 _MAX_DOCUMENT_CACHE = 8
+_MAX_SEARCH_NEW_DOCUMENTS = 5
 _STOP_TOKENS = frozenset(
     {
         "알려줘",
@@ -87,10 +89,13 @@ class OpenDartError(RuntimeError):
     """Base class for errors that can cross the OpenDART adapter boundary."""
 
     safe_message = "OpenDART request failed"
+    error_code = "api_error"
 
 
 class OpenDartTransportError(OpenDartError):
     """The OpenDART endpoint could not be reached or returned HTTP failure."""
+
+    error_code = "transport_error"
 
     def __init__(self, endpoint: str, status_code: int | None = None) -> None:
         self.endpoint = endpoint
@@ -103,11 +108,43 @@ class OpenDartTransportError(OpenDartError):
 class OpenDartApiError(OpenDartError):
     """The endpoint returned an OpenDART status other than success/not-found."""
 
+    error_code = "api_error"
+
     def __init__(self, endpoint: str, status: str) -> None:
         self.endpoint = endpoint
         self.status = status
         self.safe_message = f"OpenDART response status {status or 'unknown'} at {endpoint}"
         super().__init__(self.safe_message)
+
+
+class OpenDartAuthError(OpenDartApiError):
+    """OpenDART authentication or configuration failure (statuses 010, 011, 012)."""
+
+    error_code = "auth_error"
+
+    def __init__(self, endpoint: str, status: str) -> None:
+        super().__init__(endpoint, status)
+        self.safe_message = f"OpenDART authentication failure ({status}) at {endpoint}"
+
+
+class OpenDartQuotaError(OpenDartApiError):
+    """OpenDART request or daily rate limit exceeded (statuses 020, 021)."""
+
+    error_code = "quota_error"
+
+    def __init__(self, endpoint: str, status: str) -> None:
+        super().__init__(endpoint, status)
+        self.safe_message = f"OpenDART quota limit exceeded ({status}) at {endpoint}"
+
+
+class OpenDartServiceError(OpenDartApiError):
+    """OpenDART service maintenance or temporary outage (status 800)."""
+
+    error_code = "service_error"
+
+    def __init__(self, endpoint: str, status: str) -> None:
+        super().__init__(endpoint, status)
+        self.safe_message = f"OpenDART service maintenance or temporary outage ({status}) at {endpoint}"
 
 
 class OpenDartNotFound(OpenDartError):
@@ -120,10 +157,33 @@ class OpenDartMalformedResponse(OpenDartError):
     """OpenDART returned a body that does not match the documented shape."""
 
     safe_message = "OpenDART response shape is invalid"
+    error_code = "malformed_response"
 
     def __init__(self, endpoint: str) -> None:
         self.endpoint = endpoint
         super().__init__(self.safe_message)
+
+
+_ALLOWLISTED_SOURCE_ERROR_CODES = frozenset(
+    {
+        "auth_error",
+        "quota_error",
+        "service_error",
+        "transport_error",
+        "malformed_response",
+        "api_error",
+    }
+)
+
+
+def _api_error_for_status(endpoint: str, status: str) -> OpenDartApiError:
+    if status in {"010", "011", "012"}:
+        return OpenDartAuthError(endpoint, status)
+    if status in {"020", "021"}:
+        return OpenDartQuotaError(endpoint, status)
+    if status == "800":
+        return OpenDartServiceError(endpoint, status)
+    return OpenDartApiError(endpoint, status)
 
 
 @dataclass(frozen=True)
@@ -235,7 +295,7 @@ class OpenDartClient:
         if status in {"013", "014"}:
             return payload
         if status != "000":
-            raise OpenDartApiError(endpoint, status)
+            raise _api_error_for_status(endpoint, status)
         return payload
 
     def document_zip(self, rcept_no: str) -> bytes:
@@ -257,14 +317,14 @@ class OpenDartClient:
             status = payload.get("status") if isinstance(payload, dict) else None
             if status in {"013", "014"}:
                 raise OpenDartNotFound
-            raise OpenDartApiError("/document.xml", str(status or "unknown"))
+            raise _api_error_for_status("/document.xml", str(status or "unknown"))
         if stripped.startswith(b"<"):
             status_match = re.search(rb"<status>\s*([0-9A-Za-z]+)\s*</status>", stripped)
             if status_match:
                 status = status_match.group(1).decode("ascii", errors="ignore")
                 if status in {"013", "014"}:
                     raise OpenDartNotFound
-                raise OpenDartApiError("/document.xml", status)
+                raise _api_error_for_status("/document.xml", status)
         if not zipfile.is_zipfile(io.BytesIO(content)):
             raise OpenDartMalformedResponse("/document.xml")
         return content
@@ -277,13 +337,23 @@ class OpenDartClient:
             raise OpenDartMalformedResponse("/corpCode.xml") from exc
         if not zipfile.is_zipfile(io.BytesIO(content)):
             stripped = content.strip().lstrip(b"\xef\xbb\xbf")
+            if stripped.startswith(b"{"):
+                try:
+                    payload = json.loads(stripped.decode("utf-8", errors="replace"))
+                except Exception as exc:
+                    raise OpenDartMalformedResponse("/corpCode.xml") from exc
+                status = payload.get("status") if isinstance(payload, dict) else None
+                status_str = str(status or "unknown")
+                if status_str in {"013", "014"}:
+                    return []
+                raise _api_error_for_status("/corpCode.xml", status_str)
             if stripped.startswith(b"<"):
                 status_match = re.search(rb"<status>\s*([0-9A-Za-z]+)\s*</status>", stripped)
                 if status_match:
                     status = status_match.group(1).decode("ascii", errors="ignore")
                     if status in {"013", "014"}:
                         return []
-                    raise OpenDartApiError("/corpCode.xml", status)
+                    raise _api_error_for_status("/corpCode.xml", status)
             raise OpenDartMalformedResponse("/corpCode.xml")
         rows: list[dict[str, str]] = []
         with zipfile.ZipFile(io.BytesIO(content)) as handle:
@@ -401,6 +471,7 @@ def _source_result(
     citations: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
     endpoint: str = "/list.json",
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     response = result(status, data, citations=citations, limitations=limitations)
     response["source"] = {
@@ -408,6 +479,10 @@ def _source_result(
         "endpoint": endpoint,
         "read_only": True,
     }
+    if error_code is not None:
+        if error_code not in _ALLOWLISTED_SOURCE_ERROR_CODES:
+            raise ValueError(f"unallowlisted error code: {error_code}")
+        response["error_code"] = error_code
     return response
 
 
@@ -512,7 +587,16 @@ class OpenDartSource:
         return _source_result("info_limit", [], limitations=["OpenDART company catalog does not provide sector membership"], endpoint="/corpCode.xml")
 
     def _failure(self, exc: OpenDartError) -> dict:
-        return _source_result("error", {}, limitations=[exc.safe_message], endpoint=getattr(exc, "endpoint", "/list.json"))
+        code = getattr(exc, "error_code", "api_error")
+        if code not in _ALLOWLISTED_SOURCE_ERROR_CODES:
+            code = "api_error"
+        return _source_result(
+            "error",
+            {},
+            limitations=[exc.safe_message],
+            endpoint=getattr(exc, "endpoint", "/list.json"),
+            error_code=code,
+        )
 
     @staticmethod
     def _window(*values: object, rcept_from: str | None = None, rcept_to: str | None = None, lookback_days: int = 1825) -> tuple[str, str]:
@@ -915,18 +999,78 @@ class OpenDartSource:
         total_bytes = 0
         try:
             with zipfile.ZipFile(io.BytesIO(archive)) as handle:
-                for info in handle.infolist():
-                    if info.is_dir() or info.file_size > self.client.config.max_document_bytes:
-                        continue
+                infos = [
+                    info for info in handle.infolist()
+                    if not info.is_dir()
+                    and info.file_size <= self.client.config.max_document_bytes
+                    and info.filename.casefold().endswith((".xml", ".html", ".htm", ".txt"))
+                ]
+                exact = [info for info in infos if Path(info.filename).stem == receipt]
+                main = exact[0] if exact else (max(infos, key=lambda i: i.file_size) if infos else None)
+                ordered_infos = ([main] + [i for i in infos if i != main]) if main else infos
+
+                seen_paths: dict[str, int] = {}
+                for sequence, info in enumerate(ordered_infos, start=1):
                     total_bytes += info.file_size
                     if total_bytes > self.client.config.max_document_bytes:
                         raise OpenDartMalformedResponse("/document.xml")
-                    if not info.filename.casefold().endswith((".xml", ".html", ".htm", ".txt")):
-                        continue
                     raw = handle.read(info)
-                    text, tables = self._visible_text(raw)
-                    if text:
-                        sections.extend(self._split_sections(text, Path(info.filename).name, tables))
+                    decoded = _decode_content(raw)
+                    if not decoded.strip():
+                        continue
+                    is_attachment = (sequence > 1)
+                    try:
+                        chunks = parse_periodic_source(
+                            decoded,
+                            doc_id=str(filing.get("doc_id") or f"opendart-{receipt}"),
+                            rcept_no=receipt,
+                            src_file=Path(info.filename).name,
+                            document_sequence=sequence,
+                            attachment=is_attachment,
+                            max_chars=_MAX_CHUNK_CHARS,
+                        )
+                    except Exception:
+                        chunks = []
+
+                    if not chunks:
+                        text, tables = self._visible_text(raw)
+                        if text:
+                            raw_sections = self._split_sections(text, Path(info.filename).name, tables)
+                            for sec in raw_sections:
+                                p = f"[attachment] {sec.path}" if is_attachment and not sec.path.startswith("[attachment]") else sec.path
+                                if p in seen_paths:
+                                    seen_paths[p] += 1
+                                    p = f"{p} ({seen_paths[p]})"
+                                else:
+                                    seen_paths[p] = 1
+                                sections.append(_Section(p, sec.chunks, sec.n_tables))
+                        continue
+
+                    current_path: str | None = None
+                    section_chunks: list[str] = []
+                    section_tables = 0
+
+                    def commit_section() -> None:
+                        nonlocal current_path, section_chunks, section_tables
+                        if current_path is not None and section_chunks:
+                            sections.append(_Section(current_path, tuple(section_chunks), section_tables))
+                        current_path = None
+                        section_chunks = []
+                        section_tables = 0
+
+                    for chunk in chunks:
+                        raw_path = chunk["path"]
+                        if current_path is None or chunk["part"] == 1:
+                            commit_section()
+                            if raw_path in seen_paths:
+                                seen_paths[raw_path] += 1
+                                current_path = f"{raw_path} ({seen_paths[raw_path]})"
+                            else:
+                                seen_paths[raw_path] = 1
+                                current_path = raw_path
+                        section_chunks.append(chunk["text"])
+                        section_tables += chunk["n_tables"]
+                    commit_section()
         except (zipfile.BadZipFile, RuntimeError, OSError, ValueError):
             raise OpenDartMalformedResponse("/document.xml") from None
         if not sections:
@@ -1043,6 +1187,8 @@ class OpenDartSource:
             resolved = self.resolve_company(query)
             if resolved.get("status") == "ok":
                 corp_code = resolved["data"].get("corp_code")
+            elif resolved.get("status") == "error":
+                return resolved
         if not isinstance(corp_code, str) or not corp_code:
             return _source_result("info_limit", [], limitations=["corp_code is required for live OpenDART retrieval"])
         latest_only = filters.get("latest_only", True)
@@ -1076,12 +1222,29 @@ class OpenDartSource:
                 and (base_year is None or row.get("base_year") == base_year)
                 and (base_month is None or row.get("base_month") == base_month)
             ]
+            candidates.sort(key=lambda row: (str(row.get("rcept_dt") or ""), str(row.get("rcept_no") or "")), reverse=True)
+            local_documents: dict[str, _Document] = {}
+            new_downloads = 0
+            unexplored_candidates = False
             ranked: list[tuple[float, dict[str, Any], str]] = []
             for filing in candidates:
-                try:
-                    document = self._document(filing)
-                except OpenDartNotFound:
-                    continue
+                receipt = str(filing.get("rcept_no") or "")
+                document = local_documents.get(receipt)
+                if document is None:
+                    if receipt in self._documents:
+                        document = self._documents[receipt]
+                        self._documents.move_to_end(receipt)
+                        local_documents[receipt] = document
+                    else:
+                        if new_downloads >= _MAX_SEARCH_NEW_DOCUMENTS:
+                            unexplored_candidates = True
+                            continue
+                        try:
+                            new_downloads += 1
+                            document = self._document(filing)
+                        except OpenDartNotFound:
+                            continue
+                        local_documents[receipt] = document
                 for section in document.sections:
                     if path_hint and path_hint not in section.path:
                         continue
@@ -1096,7 +1259,8 @@ class OpenDartSource:
             for score, filing, section_part in ranked[:k]:
                 path, part_text = section_part.split("\0", 1)
                 part = int(part_text)
-                document = self._document(filing)
+                receipt = str(filing.get("rcept_no") or "")
+                document = local_documents[receipt]
                 section = next(item for item in document.sections if item.path == path)
                 text = section.chunks[part - 1]
                 item = {
@@ -1108,6 +1272,8 @@ class OpenDartSource:
                     "citation": _citation(filing, path),
                 }
                 data.append(item)
+            if unexplored_candidates and "OpenDART candidate retrieval was bounded" not in limitations:
+                limitations.append("OpenDART candidate retrieval was bounded")
             return _source_result(
                 "ok" if data else "not_found",
                 data,
@@ -1139,9 +1305,14 @@ class OpenDartSource:
 
 __all__ = [
     "OpenDartApiError",
+    "OpenDartAuthError",
     "OpenDartClient",
     "OpenDartConfig",
     "OpenDartError",
+    "OpenDartMalformedResponse",
+    "OpenDartNotFound",
+    "OpenDartQuotaError",
+    "OpenDartServiceError",
     "OpenDartSource",
     "OpenDartTransportError",
 ]

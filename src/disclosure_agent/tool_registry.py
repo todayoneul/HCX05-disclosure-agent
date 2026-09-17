@@ -54,6 +54,23 @@ _CANONICAL_CITATION_KEYS = frozenset(
     )
 )
 _RESULT_STATUSES = frozenset(("ok", "not_found", "ambiguous", "info_limit", "error"))
+_TRUSTED_BACKEND_ERRORS: MappingProxyType[str, tuple[str, str]] = MappingProxyType(
+    {
+        "auth_error": ("backend_auth_error", "The backend authentication failed."),
+        "quota_error": ("backend_quota_error", "The backend rate limit or quota was exceeded."),
+        "service_error": ("backend_service_error", "The backend service is temporarily unavailable."),
+        "transport_error": ("backend_transport_error", "The backend transport connection failed."),
+        "malformed_response": ("backend_malformed_response", "The backend returned a malformed response."),
+        "api_error": ("backend_api_error", "The backend returned an unhandled API error."),
+        "opendart_auth_error": ("backend_auth_error", "The backend authentication failed."),
+        "opendart_quota_error": ("backend_quota_error", "The backend rate limit or quota was exceeded."),
+        "opendart_service_error": ("backend_service_error", "The backend service is temporarily unavailable."),
+        "opendart_transport_error": ("backend_transport_error", "The backend transport connection failed."),
+        "opendart_malformed_response": ("backend_malformed_response", "The backend returned a malformed response."),
+        "opendart_api_error": ("backend_api_error", "The backend returned an unhandled API error."),
+    }
+)
+
 _DECIMAL_PATTERN = re.compile(r"^-?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?$")
 _DEFAULT_MAX_RESULT_CHARS = 65_536
 _MAX_JSON_DEPTH = 32
@@ -688,16 +705,31 @@ class ToolRegistry:
             return self._error(tool_name, "tool_execution_failed")
         status = resolution.get("status") if isinstance(resolution, Mapping) else None
         if status != "ok":
-            reported = status if status in {"not_found", "ambiguous"} else "not_found"
-            return self._normalize(
-                tool_name,
-                {
-                    "status": reported,
-                    "data": [],
-                    "citations": [],
-                    "limitations": ["named company was not uniquely resolved"],
-                },
-            )
+            if status in {"not_found", "ambiguous", "info_limit", "error"}:
+                raw_limitations = resolution.get("limitations")
+                limitations = (
+                    list(raw_limitations)
+                    if isinstance(raw_limitations, list) and raw_limitations
+                    else ["named company was not uniquely resolved"]
+                )
+                raw_data = resolution.get("data")
+                data = (
+                    raw_data
+                    if isinstance(raw_data, (dict, list))
+                    else ({} if status == "error" else [])
+                )
+                raw_citations = resolution.get("citations")
+                citations = list(raw_citations) if isinstance(raw_citations, list) else []
+                payload = {
+                    "status": status,
+                    "data": data,
+                    "citations": citations,
+                    "limitations": limitations,
+                }
+                if "error_code" in resolution:
+                    payload["error_code"] = resolution["error_code"]
+                return self._normalize(tool_name, payload)
+            return self._error(tool_name, "malformed_tool_result")
         corp_code = resolution["data"].get("corp_code") if isinstance(resolution["data"], Mapping) else None
         if not isinstance(corp_code, str) or not corp_code:
             return self._error(tool_name, "tool_execution_failed")
@@ -772,6 +804,12 @@ class ToolRegistry:
             if status not in _RESULT_STATUSES:
                 raise ValueError("tool result status differs")
             if status == "error":
+                raw_code = response.get("error_code")
+                if raw_code is not None:
+                    if not isinstance(raw_code, str) or raw_code not in _TRUSTED_BACKEND_ERRORS:
+                        return self._error(tool_name, "malformed_tool_result")
+                    dispatch_code, dispatch_message = _TRUSTED_BACKEND_ERRORS[raw_code]
+                    return self._error(tool_name, dispatch_code, message=dispatch_message)
                 return self._error(tool_name, "tool_rejected_arguments")
             limitations = response["limitations"]
             citations = response["citations"]
@@ -851,7 +889,7 @@ class ToolRegistry:
             return _structured_evidence(tool_name, data)
         return ()
 
-    def _error(self, tool_name: str, code: str) -> ToolDispatchResult:
+    def _error(self, tool_name: str, code: str, message: str | None = None) -> ToolDispatchResult:
         messages = {
             "unknown_tool": "The requested tool is not available.",
             "invalid_arguments": "The tool arguments violate the closed contract.",
@@ -860,7 +898,14 @@ class ToolRegistry:
             "malformed_tool_result": "The tool returned an invalid result.",
             "result_too_large": "The tool result exceeds the bounded response size.",
             "lineage_changed": "The bound tool snapshot changed during dispatch.",
+            "backend_auth_error": "The backend authentication failed.",
+            "backend_quota_error": "The backend rate limit or quota was exceeded.",
+            "backend_service_error": "The backend service is temporarily unavailable.",
+            "backend_transport_error": "The backend transport connection failed.",
+            "backend_malformed_response": "The backend returned a malformed response.",
+            "backend_api_error": "The backend returned an unhandled API error.",
         }
+        msg = message if message is not None else messages[code]
         return ToolDispatchResult(
             tool_name=tool_name,
             status="error",
@@ -868,7 +913,7 @@ class ToolRegistry:
             citations=(),
             limitations=(),
             evidence=(),
-            error=ToolDispatchError(code=code, message=messages[code]),
+            error=ToolDispatchError(code=code, message=msg),
             lineage=self.lineage,
         )
 

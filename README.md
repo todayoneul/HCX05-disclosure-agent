@@ -1,27 +1,92 @@
 # 금융 공시 질의응답 에이전트 (Disclosure Agent)
 
-한국어 기업 공시를 근거로 재무 수치, 공시 이벤트, 정정 이력, 기업 개요와 사업 내용을
-조회·계산·요약하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다.
-HyperCLOVA X(HCX-005)는 복합 질의의 오케스트레이션을 담당하고, 수치 조회·계산·근거
-검증은 결정적 도구와 Python `Decimal` 기반 로직으로 처리합니다.
+한국어 기업 공시를 분석하여 재무 수치, 공시 이벤트, 정정 내역, 기업 개요 및 사업 내용을 정확하게 답변하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다. 금융 분석가와 개발자가 신뢰할 수 있는 공시 질의응답을 제공하도록 설계되었습니다. 금융감독원 OpenDART 실시간 공개 API를 단일 데이터 원천(Live, Read-only)으로 활용하며, 사전 구축된 대용량 코퍼스나 SQLite/FTS 인덱스 파일 없이도 즉시 구동됩니다. 기업 고유번호 카탈로그(`corpCode.xml`), 공시 목록(`list.json`), 공시 원문 아카이브(`document.xml`)의 세 가지 엔드포인트를 사용하며, 기업 카탈로그는 첫 회사명 질의 시점에 지연 로딩(lazy-loading)되어 서버 기동을 지연시키지 않습니다.
 
-이 브랜치(`codex/opendart-data-source`)는 금융감독원 **OpenDART API**를 기본 데이터
-소스로 사용합니다. 기존 대회 코퍼스나 SQLite/FTS 산출물이 없어도 서버가 시작되며,
-공시 목록과 원문은 요청 시 OpenDART에서 조회합니다. 회사명 조회에 필요한 전체 법인
-목록은 첫 회사명 질의 때 지연 로딩하므로 서버 시작을 막지 않습니다.
+## 시스템 아키텍처
 
-## OpenDART 빠른 시작
+질의 성격에 따라 처리 경로를 분기합니다. 단순 재무 지표 조회, 비율 연산, 업종 순위, 이벤트 합계 등 정형 질의는 모델 호출 없이 결정적 도구 계층에서 직접 처리하며, 복합 서술형 질의만 HyperCLOVA X(HCX-005) 플래너를 거쳐 유계(bounded) 도구 호출을 조율합니다. 모든 수치 연산에는 모델의 암산 대신 Python `Decimal` 모듈을 사용합니다. 질의당 도구 호출 최대 8회, 모델 호출 최대 6회, 내부 270초 하드 데드라인(Hard Deadline)의 엄격한 실행 예산 안에서 동작합니다.
 
-Python 3.13 환경에서 의존성을 설치한 다음 `.env.example`을 복사해 두 키를 설정합니다.
+```mermaid
+flowchart TB
+    Q[질문 수신] --> VAL{입력 및 범위 검증}
+    VAL -- 유효하지 않음 --> LIM[정보 한계 응답]
+    VAL -- 정상 질의 --> ROUTE{질의 라우팅}
+
+    subgraph Deterministic[결정적 도구 계층]
+        ROUTE -- 정형 질의 --> D_TOOLS[도구 실행 및 Decimal 계산]
+        D_TOOLS --> PACK[근거 컨텍스트 패킹]
+    end
+
+    subgraph Agentic[유계 오케스트레이션 계층]
+        ROUTE -- 복합 질의 --> HCX[HyperCLOVA X 플래너]
+        HCX --> D_TOOLS
+    end
+
+    subgraph DataLayer[OpenDART 데이터 계층]
+        CORP[corpCode.xml 기업 목록]
+        LIST[list.json 공시 목록]
+        DOC[document.xml 원문 아카이브]
+    end
+
+    D_TOOLS --> CORP
+    D_TOOLS --> LIST
+    D_TOOLS --> DOC
+
+    PACK --> VERIFY{사후 검증: 수치·단위·인용}
+    VERIFY -- 검증 실패 --> LIM
+    VERIFY -- 검증 통과 --> SER[5개 필드 응답 직렬화]
+    SER --> API[FastAPI GET /answer]
+```
+
+## 질의 처리 흐름
+
+1. **입력 및 범위 검증**: 질문 길이, 제어문자 유무, 공시 데이터베이스 범위를 검증합니다.
+2. **질의 분석 및 라우팅**: 단일 지표나 정형 질의는 결정적 도구 경로로 직행하고, 복합 질의는 HyperCLOVA X 플래너로 전달합니다.
+3. **기업 식별 및 공시 목록 탐색**: `corpCode.xml`로 기업 고유번호를 확인하고, `list.json`을 통해 해당 연도 및 보고서 접수번호를 확보합니다.
+4. **공시 원문 수집 및 구조화 파싱**: `document.xml`에서 압축 원문을 수집한 뒤, 표 구조와 섹션 목차 계층을 보존하여 파싱합니다.
+5. **결정적 수치 계산 및 컨텍스트 패킹**: 재무비율이나 증감률은 Python `Decimal` 모듈로 정밀 연산하고, 12개 정규 필드를 갖춘 표준 인용 컨텍스트를 구성합니다.
+6. **사후 검증 및 안전 폐쇄(Fail-Closed)**: 답변에 포함된 핵심 수치, 단위, 인용 접수번호가 수집된 근거와 정확히 일치하는지 대조하며, 근거가 불충분하면 추측 대신 정보 한계 응답을 반환합니다.
+7. **표준 응답 반환**: 검증을 통과한 답변을 5개 필수 필드로 직렬화하여 `GET /answer`로 전달합니다.
+
+## 기능 지원 범위 및 한계
+
+| 영역 | 정확한 지원 범위 | 현재 정보 한계(Information-Limit) 응답 대상 |
+|---|---|---|
+| **재무 수치 및 지표** | 사업보고서, 분·반기보고서에 명시된 재무제표 수치, Python `Decimal` 기반 비율 및 증감률 연산 | 원문에 공시되지 않은 외부 지표, 임의 추정치, 비정형 서식 미제공 항목 |
+| **공시 메타데이터** | 기업 고유번호, 종목코드, 보고서 유형, 접수번호, 제출일자, 원문 목차 및 주요 본문 내용 | OpenDART 메타데이터에 포함되지 않은 한국표준산업분류(KSIC) 기준 순위 및 소속 판별 |
+| **정정 공시 이력** | 공시명에 정정 표기된 최신 공시 식별, 최신 접수번호 기준 사실 전달 | `list.json` 메타데이터만으로 최초 원본 접수번호를 완전히 추적하기 어려운 복합 정정 계보 |
+| **공시 이벤트** | 공시 목록상 명시된 주요 보고서 접수 현황 및 원문 내 명시된 사건 사실 | 구조화된 이벤트 금액·발생일자(정형 메타데이터 부재) 및 철회·취소 공시의 세부 계보 추적 |
+
+## 핵심 설계 원칙
+
+- **결정적 도구 우선 (Deterministic-First)**: 재무비율, 증감률, 기간 차감 연산은 모델 암산에 의존하지 않고 Python `Decimal` 기반 계산기로 수행하여 확률적 수치 오차와 반올림 환각을 차단합니다. 회사 식별, 공시 목록 조회, 원문 섹션 탐색 등 사실 조회는 닫힌 도구 집합으로 처리합니다.
+- **정정 공시 계보 인식 (Correction-Lineage Awareness)**: 원본 공시와 정정 공시를 식별하여 항상 최신 공시 접수번호를 기준으로 사실을 검증합니다. 정정 계보가 불완전하거나 이전 원본 번호가 모호한 경우 단정적인 추측을 배제하고 정보 한계로 안전하게 분기합니다.
+- **유계 플래너 및 사후 검증 (Bounded Planner & Post-Verification)**: 정형 질의는 모델 호출 없이 직행하고 복합 질의만 HyperCLOVA X 플래너로 라우팅합니다. 질의당 도구 호출 최대 8회, 모델 호출 최대 6회, 내부 270초 하드 데드라인의 엄격한 실행 예산을 둡니다. 생성된 답변의 수치, 단위, 인용 접수번호가 근거와 일치하는지 사후 검증하여 불일치 시 답변 생성을 중단합니다.
+
+### 데이터 소스 안정성 및 처리 방식
+
+- **원문 표(Table) 및 섹션 계층 보존**: DART 공시 원문 파싱 시 HTML 표를 마크다운 표로 변환하고 목차 계층 경로를 보존합니다. 재무제표와 주요 현황의 행·열 레이블과 수치가 왜곡 없이 정렬된 상태로 패킹됩니다.
+- **질의당 유계 문서 수집 및 캐시 보호**: 단일 질의 처리 과정에서 신규 공시 문서 다운로드를 최대 5건으로 제한하고 동일 접수번호의 중복 다운로드를 차단합니다. OpenDART API 쿼터 고갈과 레이턴시 급증을 방지합니다.
+- **장애 유형화 및 데이터 부재 분리**: OpenDART의 인증 오류, 쿼터 소진, 서비스 장애, 전송 오류, 비정상 응답 등 유형화된 장애는 단순 데이터 부재로 취급하지 않고 명확한 에러로 분기합니다. 일시적 백엔드 장애는 캐시에 남기지 않으며, 정상 조회가 완료된 실제 데이터 부재 결과만 안전하게 캐싱합니다.
+
+## 빠른 시작 (Quick Start)
+
+### 1. 환경 변수 설정
 
 ```sh
 cp .env.example .env
-# OPEN_DART=<OpenDART API 인증키>
-# HCX_API_KEY=<HyperCLOVA X API 인증키>
 ```
 
-NCloud/HCX 요청은 `HCX_API_KEY`만 사용합니다. `HCX_API_KEY_SUBMIT`은 읽거나 대체 키로
-사용하지 않습니다. `.env`는 Git에서 제외됩니다.
+`.env` 파일에 필요한 인증키를 설정합니다.
+
+```ini
+OPEN_DART=<OpenDART API 인증키>
+HCX_API_KEY=<HyperCLOVA X API 인증키>
+```
+
+인증 키는 OpenDART 연동 시 `OPEN_DART`, NCloud/HCX 호출 시 `HCX_API_KEY`만 사용합니다. `HCX_API_KEY_SUBMIT`은 시스템에서 전혀 읽거나 사용하지 않습니다.
+
+### 2. 로컬 서버 실행
 
 ```sh
 PYTHONPATH=src .venv/bin/python -m uvicorn \
@@ -30,205 +95,75 @@ PYTHONPATH=src .venv/bin/python -m uvicorn \
 curl -s http://127.0.0.1:8001/healthz
 ```
 
-정상 상태에서는 `pipeline_release`와 `retrieval_release`가 모두
-`opendart-runtime`으로 표시됩니다. 현재 구현은 공시 목록·원문·회사 식별을 API로
-제공하며, OpenDART 메타데이터에 없는 업종 분류, 구조화된 이벤트 금액/발생일,
-검증된 정정 계보는 `info_limit`로 응답합니다. 실행 계약과 검증 결과는
-[OpenDART 운영 안내](docs/codex/OPENDART_DATA_SOURCE_IMPLEMENTATION.md)에 정리했습니다.
+정상 상태에서는 `pipeline_release`와 `retrieval_release`가 모두 `opendart-runtime`으로 응답합니다.
 
-실환경 스모크에서는 서버 시작과 `/healthz` 200 응답, 공시 목록 1건 조회, 해당
-접수번호의 원문 ZIP 다운로드, 섹션 파싱 및 본문 읽기까지 확인했습니다. 이 과정에서
-HCX 모델 호출은 실행하지 않았습니다.
+### 3. Docker Compose 실행
 
 ```sh
-PYTHONPATH=src .venv/bin/pytest -q \
-  tests/unit/test_opendart_source.py tests/unit/test_opendart_production.py
+docker compose build --pull
+docker compose up -d
+
+curl -s http://127.0.0.1:8080/healthz
 ```
 
-이 저장소는 공개 가능한 애플리케이션 소스와 서빙 계약을 제공합니다. 주최 측 제공 원본
-코퍼스, 생성된 SQLite/FTS 인덱스, 운영 산출물, 평가 케이스와 자격 증명은 저장소에
-포함하지 않습니다.
+### 4. 질의응답 API 호출 및 응답 규약
 
-<table>
-<tr>
-<td align="center"><b>OpenDART</b><br><sub>실시간 공시 데이터</sub></td>
-<td align="center"><b>9</b><br><sub>결정적 도구</sub></td>
-<td align="center"><b>270 s</b><br><sub>내부 hard deadline</sub></td>
-<td align="center"><b>1</b><br><sub>FastAPI worker</sub></td>
-</tr>
-</table>
-
-## 핵심 설계 원칙
-
-### 결정적 도구 우선
-
-회사 식별, 업종 후보 확정, 공시 이벤트 조회, 공시 목록·목차 탐색, 원문 섹션 조회,
-어휘 검색, 정정 이력 조회, 사칙연산은 닫힌 도구 집합으로 처리합니다.
-
-재무비율·증감률·기간 차감과 같은 계산은 모델이 암산하지 않고 Python `Decimal` 기반
-계산기로 수행합니다. 따라서 모델의 생성 확률에 따라 수치·단위·반올림이 달라지지 않습니다.
-
-### 정정 공시 계보 보존
-
-원본 공시와 정정 공시를 `root_rcept_no` 및 `latest_rcept_no` 기준으로 연결합니다. 답변은
-최신 여부와 관련 접수번호를 근거에 포함하며, 모호하거나 미해결된 연결은 확정된 최신
-사실로 취급하지 않습니다.
-
-### 유계 플래너와 사후 검증
-
-단일 재무지표, 비율 계산, 업종 순위, 이벤트 합계와 같은 정형 질의는 모델 호출 없이
-결정적 경로로 처리합니다. 복합·자유 질의만 HyperCLOVA X 플래너로 전달하며, 도구 호출
-8회, 모델 호출 6회, 내부 hard deadline 270초의 실행 한도를 둡니다.
-
-생성된 초안은 답변의 핵심 수치와 인용 접수번호가 실제 근거와 일치하는지 다시 검증합니다.
-근거가 부족하거나 요청 범위를 벗어나면 추측 대신 정보 한계 응답으로 종료합니다.
-
-## 시스템 구성
-
-```mermaid
-flowchart TB
-    Q[질문 수신] --> S{입력·범위 검증}
-    S -- 범위 밖 또는 주입 --> X[정보 한계 응답]
-    S -- 정상 --> R{라우팅}
-
-    subgraph Deterministic[결정적 처리 계층]
-        R -- 정형 질의 --> D[9개 도구 + Decimal 계산]
-        D --> C[근거 컨텍스트 패킹]
-    end
-
-    subgraph Agentic[유계 에이전트 계층]
-        R -- 복합 질의 --> P[HCX-005 플래너]
-        P --> D
-    end
-
-    subgraph Data[OpenDART 데이터 계층]
-        CAT[corpCode.xml 회사 목록]
-        LIST[list.json 공시 목록]
-        DOC[document.xml 공시 원문]
-    end
-
-    D --> CAT
-    D --> LIST
-    D --> DOC
-    C --> V[사후 근거·수치·인용 검증]
-    V -- 실패 --> X
-    V -- 통과 --> A[답변 직렬화]
-    A --> API[FastAPI GET /answer]
+```sh
+curl -G http://127.0.0.1:8080/answer \
+  --data-urlencode "question_id=SAMPLE-001" \
+  --data-urlencode "question=삼성전자 2024년 사업보고서상 매출액은 얼마인가요?"
 ```
 
-데이터 계층은 OpenDART API에 읽기 전용으로 접근합니다. 회사 목록은 회사명 식별이
-필요한 첫 요청에서만 내려받고, 공시 목록과 원문은 질의 범위에 맞춰 요청 시 조회합니다.
-별도의 코퍼스나 SQLite/FTS 릴리즈를 복원할 필요가 없습니다.
-
-## 주요 처리 흐름
-
-1. 질문의 길이·제어문자·공시 범위를 검증합니다.
-2. 기업명, 영문명, 종목코드, 과거 사명을 DART 기업 식별자로 정규화합니다.
-3. 정형 질의는 결정적 도구로 직접 처리하고, 복합 질의는 유계 HCX 플래너로 라우팅합니다.
-4. OpenDART 공시 목록에서 기준연도와 보고서 유형을 확인합니다.
-5. 내려받은 원문 섹션과 검색 청크를 컨텍스트로 패킹하고, 필요한 수치는 `Decimal`로 계산합니다.
-6. 답변의 수치·단위·인용 접수번호를 검증한 뒤 API 응답으로 직렬화합니다.
-
-## API 계약
-
-평가 및 운영 서버는 인증 없는 순차 `GET` 요청을 수신합니다.
-
-```http
-GET /answer?question_id={id}&question={URL-encoded question}
-```
-
-성공 응답은 정확히 다음 다섯 개의 문자열 필드를 반환합니다.
+성공 응답은 정확히 아래 5개의 문자열 필드로 구성된 JSON 객체를 반환합니다.
 
 ```json
 {
-  "question_id": "EVAL-001",
-  "question": "삼성전자 2024년 연결 매출액을 알려 주세요.",
+  "question_id": "SAMPLE-001",
+  "question": "삼성전자 2024년 사업보고서상 매출액은 얼마인가요?",
   "retrieved_context": "...",
   "think_trace": "...",
   "answer": "..."
 }
 ```
 
-`/healthz`는 모델을 호출하지 않고 서비스 준비 상태와 데이터 릴리즈 식별자를 확인합니다.
-잘못된 요청은 `422`, 내부 deadline 초과나 일시적 장애는 `503`으로 처리합니다.
-
-### 로컬 실행 예시
-
-```sh
-cp .env.example .env
-# .env에 OPEN_DART와 HCX_API_KEY를 로컬에서 설정
-
-uv sync --locked --extra dev
-uv lock --check
-uv run python -c "import dotenv, requests; print('declared-runtime-imports: OK')"
-uv run pytest --collect-only -q
-uv run pytest -q
-
-docker compose build --pull
-docker compose up -d
-curl --fail http://127.0.0.1:8080/healthz
-
-curl -G http://127.0.0.1:8080/answer \
-  --data-urlencode "question_id=LOCAL-001" \
-  --data-urlencode "question=삼성전자 2024년 연결 매출액을 알려 주세요."
-```
-
-공개 소스 체크아웃만으로 코드·계약 테스트와 컨테이너 구성 검증을 수행할 수 있습니다.
-실제 `/healthz` 및 `/answer` 실행에는 `OPEN_DART`와 `HCX_API_KEY`를 설정한 로컬
-`.env`가 필요하며, 별도의 데이터 릴리즈는 필요하지 않습니다.
-
-## 검증 기준
-
-| 항목 | 기준 |
-|---|---|
-| Python | 3.13.11, `uv.lock` 고정 |
-| 모델 | HyperCLOVA X HCX-005 native v3 |
-| 검색 | OpenDART 원문 기반 유계 어휘 검색 |
-| 서빙 | FastAPI + Uvicorn, worker 1개 |
-| 컨테이너 | non-root 실행, read-only root filesystem, `/tmp` tmpfs |
-| 계산 | Python `Decimal` 기반 결정적 연산 |
-| 평가 계약 | 순차 호출, 내부 hard deadline 270초, 성공 시 5개 문자열 필드 |
-| 데이터 릴리즈 식별자 | `opendart-runtime` |
-
-기본 테스트는 OpenDART와 모델 API를 호출하지 않는 오프라인 테스트입니다. 실환경
-스모크 테스트는 OpenDART 공시 목록·원문 조회와 `/healthz`까지 별도로 확인하며,
-HCX 모델은 호출하지 않습니다.
+- **상태 코드 규약**:
+  - `200 OK`: 정상 응답 (5개 필드 계약 준수)
+  - `422 Unprocessable Entity`: 잘못된 요청 형식 또는 파라미터 유효성 검증 실패 (`AgentInputError`)
+  - `503 Service Unavailable`: 270초 내부 데드라인 초과 또는 일시적인 외부 연동 장애 (`temporary_unavailable`)
 
 ## 저장소 구조
 
 ```text
 src/disclosure_agent/
-├── agent/          # 플래너, 프롬프트, 답변 계약 및 검증기
-├── context/        # 컨텍스트 패킹
-├── corrections/    # 정정 공시 계보 추적
-├── hcx/            # HyperCLOVA X 클라이언트와 계약
-├── retrieval/      # 검색 인터페이스와 결과 계약
-├── runtime/        # 예산·재시도·서비스 런타임
-├── server/         # FastAPI 애플리케이션
-├── sources/        # OpenDART API 데이터 소스
-└── tools/          # 회사·이벤트·공시·계산 도구
+├── agent/          # 질의 라우팅, 프롬프트, 5개 필드 답변 계약 및 사후 검증기
+├── context/        # 12개 정규 필드 기반 근거 컨텍스트 패킹
+├── corrections/    # 정정 공시 계보 및 최신 공시 추적
+├── hcx/            # HyperCLOVA X 클라이언트 계약 및 런타임
+├── parsing/        # 원문 XML/HTML 구조화 파싱 (마크다운 표 및 목차 계층 보존)
+├── retrieval/      # 유계 어휘 검색 인터페이스
+├── runtime/        # 실행 예산(8회 도구, 6회 모델, 270초 데드라인) 및 재시도 게이트웨이
+├── server/         # FastAPI 기반 /healthz 및 /answer 서빙
+├── sources/        # OpenDART API 연동 계층 (corpCode, list, document)
+└── tools/          # 기업 식별, 공시 조회, Python Decimal 계산 도구
 
-pipeline/            # 데이터 처리 및 릴리즈 빌드 로직
-scripts/             # 감사·검색·평가·계약 검증 스크립트
-tests/               # 단위·계약·통합·E2E 테스트
-docs/API_SPEC.md     # HTTP API 명세
-docs/TECHNICAL_PROPOSAL.md  # 상세 설계 및 실험 문서
+pipeline/           # 데이터 파이프라인 구성 요소
+scripts/            # 평가, 감사, 계약 검증 유틸리티
+tests/              # 단위, 계약, 통합 테스트 스위트
+docs/               # 아키텍처 및 연동 문서
 ```
 
-## 공개 범위 및 보안
+### 상세 문서 링크
 
-이 저장소에는 다음 항목을 포함하지 않습니다.
+- [OpenDART 개선 로드맵 (OPENDART_IMPROVEMENT_ROADMAP.md)](docs/OPENDART_IMPROVEMENT_ROADMAP.md)
+- [API 상세 명세서 (API_SPEC.md)](docs/API_SPEC.md)
+- [기술 제안서 및 아키텍처 설계 (TECHNICAL_PROPOSAL.md)](docs/TECHNICAL_PROPOSAL.md)
+- [공개 소스 재현 안내 (SUBMISSION_REPRODUCE.md)](docs/SUBMISSION_REPRODUCE.md)
 
-- 원본 DART XML·HTML·PDF 및 제공 코퍼스
-- SQLite·FTS5 운영 인덱스와 생성된 대용량 산출물
-- 개발·holdout 평가 케이스와 내부 검수 기록
-- 에이전트 인계 문서, 작업 프롬프트, 개인 환경 설정
-- `HCX_API_KEY` 및 기타 인증 정보
+## 저장소 비포함 항목 안내
 
-`.env`, 데이터 디렉터리, 아티팩트와 런타임 산출물은 `.gitignore`로 관리합니다.
+이 저장소는 순수 애플리케이션 소스 코드와 API 계약 검증 체계만 포함하며 다음 항목은 포함하지 않습니다.
 
-## 문서
-
-- [API 명세](docs/API_SPEC.md)
-- [기술제안서 및 상세 설계](docs/TECHNICAL_PROPOSAL.md)
-- [공개 소스 체크아웃 재현 안내](docs/SUBMISSION_REPRODUCE.md)
+- 금융감독원 제공 원본 공시 XML, HTML, PDF 원시 코퍼스
+- 사전 빌드된 SQLite 데이터베이스 및 FTS5 검색 인덱스 파일
+- 비공개 평가 데이터셋 및 내부 검수 케이스
+- API 키 및 사용자 인증 자격 증명

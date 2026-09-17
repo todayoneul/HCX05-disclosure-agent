@@ -11,6 +11,15 @@ from lxml import etree, html
 
 
 _TITLE = re.compile(r"<title\b([^>]*)>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
+_HEADING = re.compile(r"<h([1-6])\b([^>]*)>(.*?)</h\1\s*>", re.IGNORECASE | re.DOTALL)
+_SECTION_RE = re.compile(
+    r"(?<![0-9A-Za-z가-힣])"
+    r"((?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX]{1,4}\s*[.)]?\s*)?"
+    r"(?:연결재무제표|재무제표|회사의?\s*개요|사업의\s*내용|재무에\s*관한\s*사항|"
+    r"이사의\s*경영진단|감사인의\s*감사의견|이사회|주주에\s*관한\s*사항|"
+    r"임원\s*및\s*직원|계열회사|이해관계자와의\s*거래|"
+    r"투자자\s*보호)[^\n]{0,100})"
+)
 _BLOCK_TAGS = frozenset({"p", "div", "section", "article", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"})
 _EXCLUDED = frozenset({"script", "style", "title", "head", "noscript"})
 
@@ -40,12 +49,15 @@ def _label(raw: str) -> str:
 
 
 def _section_path(stack: list[str], label: str) -> list[str]:
-    if re.match(r"^[IVXLC]+\.", label, re.I):
+    if re.match(r"^(?:[IVXLC]+|[Ⅰ-Ⅻ]+)\s*[.)]", label, re.I):
         return [label]
-    if re.match(r"^\d+-\d+\.", label):
+    if re.match(r"^\d+-\d+\s*[.)]", label):
         return stack[:2] + [label] if len(stack) >= 2 else stack[:1] + [label]
-    if re.match(r"^\d+\.", label):
-        return stack[:1] + [label]
+    if re.match(r"^\d+\s*[.)]", label):
+        has_roman = bool(stack and re.match(r"^(?:[IVXLC]+|[Ⅰ-Ⅻ]+)\s*[.)]", stack[0], re.I))
+        return stack[:1] + [label] if has_roman else [label]
+    if re.match(r"^[가-하]\s*[.)]", label):
+        return stack[:3] + [label] if len(stack) >= 3 else stack[:2] + [label] if len(stack) >= 2 else stack[:1] + [label]
     return stack[:1] + [label] if stack else [label]
 
 
@@ -66,8 +78,8 @@ def _table_markdown(table: etree._Element) -> str:
             while (row_index, column) in occupied:
                 column += 1
             try:
-                rowspan = max(1, int(cell.get("rowspan", "1")))
-                colspan = max(1, int(cell.get("colspan", "1")))
+                rowspan = max(1, int(next((v for k, v in cell.attrib.items() if k.lower() == "rowspan"), "1")))
+                colspan = max(1, int(next((v for k, v in cell.attrib.items() if k.lower() == "colspan"), "1")))
             except ValueError:
                 rowspan = colspan = 1
             value = _cell_text(cell).replace("|", "\\|").replace("\n", "<br>")
@@ -82,8 +94,19 @@ def _table_markdown(table: etree._Element) -> str:
     rows = [[occupied.get((row, column), "") for column in range(width)] for row in range(height)]
     lines = ["| " + " | ".join(row) + " |" for row in rows]
     lines.insert(1, "|" + "---|" * width)
-    captions = [_normal_text(caption.text_content()) for caption in table.xpath("./caption|./CAPTION")]
-    caption = next((value for value in captions if value), "")
+    captions = [_normal_text(caption.text_content()) for caption in table.xpath("./caption|./CAPTION|./unit|./UNIT")]
+    caption = "\n".join(value for value in captions if value)
+    attrs = []
+    if caption_attr := next((v for k, v in table.attrib.items() if k.lower() == "caption"), None):
+        if caption_attr.strip() and caption_attr.strip() not in caption:
+            attrs.append(caption_attr.strip())
+    if unit_attr := next((v for k, v in table.attrib.items() if k.lower() == "unit"), None):
+        unit_str = f"(단위: {unit_attr.strip()})" if "단위" not in unit_attr else unit_attr.strip()
+        if unit_str not in caption:
+            attrs.append(unit_str)
+    if attrs:
+        prefix = "\n".join(attrs)
+        caption = f"{prefix}\n{caption}" if caption else prefix
     return (caption + "\n\n" if caption else "") + "\n".join(lines)
 
 
@@ -159,22 +182,55 @@ def _split_text(text: str, max_chars: int) -> list[str]:
 
 
 def parse_periodic_source(source: str, *, doc_id: str, rcept_no: str, src_file: str, document_sequence: int, attachment: bool = False, max_chars: int = 3500) -> list[dict[str, Any]]:
-    """Parse one XML source into deterministic chunks with raw section offsets."""
+    """Parse one XML/HTML source into deterministic chunks with raw section offsets."""
     matches = list(_TITLE.finditer(source))
     has_atoc = any(re.search(r"\batoc\s*=\s*['\"]?y", match.group(1), re.I) for match in matches)
+    heading_matches = list(_HEADING.finditer(source))
+    use_headings = False
+    if not matches:
+        if heading_matches:
+            use_headings = True
+    elif len(matches) == 1 and not has_atoc and heading_matches:
+        head_match = re.search(r"<head\b[^>]*>(.*?)</head\s*>", source, re.IGNORECASE | re.DOTALL)
+        if head_match and matches[0].start() >= head_match.start() and matches[0].end() <= head_match.end():
+            use_headings = True
+
+    sections_info: list[tuple[str, int, int, bool]] = []
+    if use_headings:
+        for idx, h_match in enumerate(heading_matches):
+            label = _label(h_match.group(3)) or f"[untitled {idx + 1}]"
+            start_pos = h_match.end()
+            end_pos = heading_matches[idx + 1].start() if idx + 1 < len(heading_matches) else len(source)
+            sections_info.append((label, start_pos, end_pos, False))
+    elif matches:
+        for idx, t_match in enumerate(matches):
+            label = _label(t_match.group(2)) or f"[untitled {idx + 1}]"
+            is_atoc = bool(re.search(r"\batoc\s*=\s*['\"]?y", t_match.group(1), re.I))
+            start_pos = t_match.end()
+            end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(source)
+            sections_info.append((label, start_pos, end_pos, is_atoc))
+    else:
+        sec_matches = list(_SECTION_RE.finditer(source))
+        if sec_matches:
+            for idx, s_match in enumerate(sec_matches):
+                label = _normal_text(s_match.group(1))
+                start_pos = s_match.end()
+                end_pos = sec_matches[idx + 1].start() if idx + 1 < len(sec_matches) else len(source)
+                sections_info.append((label, start_pos, end_pos, False))
+        else:
+            sections_info.append((f"OpenDART 원문 > {src_file}", 0, len(source), False))
+
     stack: list[str] = []
     chunks: list[dict[str, Any]] = []
     chunk_number = 0
-    for index, match in enumerate(matches):
-        label = _label(match.group(2)) or f"[untitled {index + 1}]"
-        is_atoc = bool(re.search(r"\batoc\s*=\s*['\"]?y", match.group(1), re.I))
-        if not has_atoc or is_atoc:
+
+    for index, (label, section_start, section_end, is_atoc) in enumerate(sections_info):
+        if not has_atoc or is_atoc or use_headings:
             stack = _section_path(stack, label)
             path_stack = stack
         else:
             path_stack = [*stack, label]
-        section_start = match.end()
-        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+
         blocks = _ordered_blocks(source[section_start:section_end])
         expanded: list[Block] = []
         for block in blocks:

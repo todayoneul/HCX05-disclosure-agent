@@ -37,6 +37,16 @@ from .open_profile_route import lookup_open_profile, open_request, supports_open
 from .prompts import FINAL_SYSTEM_PROMPT, final_user_prompt, planner_system_prompt
 
 
+_BACKEND_TOOL_ERROR_CODES = frozenset(
+    {
+        "backend_auth_error",
+        "backend_quota_error",
+        "backend_service_error",
+        "backend_transport_error",
+        "backend_malformed_response",
+        "backend_api_error",
+    }
+)
 _SAFE_TOOL_ERROR_CODES = frozenset(
     {
         "unknown_tool",
@@ -46,8 +56,18 @@ _SAFE_TOOL_ERROR_CODES = frozenset(
         "malformed_tool_result",
         "result_too_large",
         "lineage_changed",
+        *_BACKEND_TOOL_ERROR_CODES,
     }
 )
+
+
+def _is_backend_tool_error(value: object) -> bool:
+    return (
+        type(value) is ToolDispatchResult
+        and value.status == "error"
+        and type(value.error) is ToolDispatchError
+        and value.error.code in _BACKEND_TOOL_ERROR_CODES
+    )
 _TOOL_RESULT_STATUSES = frozenset({"ok", "not_found", "ambiguous", "info_limit", "error"})
 _CANONICAL_CITATION_KEYS = frozenset(
     {
@@ -8076,6 +8096,8 @@ class AgentRunner:
             return context
 
         def finish(outcome: str, answer: str = "") -> AgentRunResult:
+            if outcome == "information_limit" and "tool_dispatch_failed" in limitations:
+                evidence.clear()
             context = safe_packed() if evidence else _empty_context(self._config)
             if context is None:
                 outcome = "failed_closed"
@@ -8177,6 +8199,10 @@ class AgentRunner:
                 limitations.append("lineage_changed")
                 audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                 return None, "failed_closed"
+            if _is_backend_tool_error(calculated):
+                limitations.append("tool_dispatch_failed")
+                audit.append(AuditEvent("tool_failed", tool_name="calculate"))
+                return None, "information_limit"
             audit.append(
                 AuditEvent(
                     "tool_called",
@@ -8253,6 +8279,11 @@ class AgentRunner:
                     limitations.append("lineage_changed")
                     audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                     return finish("failed_closed")
+                if _is_backend_tool_error(event_result):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name="query_events"))
+                    evidence.clear()
+                    return finish("information_limit")
                 audit.append(
                     AuditEvent(
                         "tool_called",
@@ -8513,6 +8544,11 @@ class AgentRunner:
                 limitations.append("lineage_changed")
                 audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                 return finish("failed_closed")
+            if _is_backend_tool_error(target_result):
+                limitations.append("tool_dispatch_failed")
+                audit.append(AuditEvent("tool_failed", tool_name="resolve_company"))
+                evidence.clear()
+                return finish("information_limit")
             audit.append(
                 AuditEvent(
                     "tool_called",
@@ -8600,6 +8636,11 @@ class AgentRunner:
                 limitations.append("lineage_changed")
                 audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                 return finish("failed_closed")
+            if _is_backend_tool_error(capital_result):
+                limitations.append("tool_dispatch_failed")
+                audit.append(AuditEvent("tool_failed", tool_name="search_chunks"))
+                evidence.clear()
+                return finish("information_limit")
             if capital_result.evidence and not _evidence_matches_company(
                 capital_result.evidence, target_company["corp_code"]
             ):
@@ -8678,12 +8719,19 @@ class AgentRunner:
                     limitations.append("open_profile_scope_mismatch")
                     return None
                 audit.append(AuditEvent("tool_called", tool_name=name, status=result.status))
+                if _is_backend_tool_error(result):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name=name))
+                    return None
                 return result if result.status == "ok" and remaining() > 0 else None
 
             profile = lookup_open_profile(question, simple_open, open_call, _safe_resolution, _name_source_company)
             limitations.extend(profile.limitations)
             if "open_profile_scope_mismatch" in limitations or not lineage_matches():
                 return finish("failed_closed")
+            if "tool_dispatch_failed" in limitations:
+                evidence.clear()
+                return finish("information_limit")
             evidence.extend(profile.evidence)
             if not profile.answer:
                 return finish("information_limit")
@@ -8726,11 +8774,18 @@ class AgentRunner:
                     audit.append(AuditEvent("failed_closed", status="tool_result"))
                     return None
                 audit.append(AuditEvent("tool_called", tool_name=name, status=result.status))
+                if _is_backend_tool_error(result):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name=name))
+                    return None
                 if result.status != "ok" or remaining() <= 0:
                     return None
                 return result
 
             resolved = pay_call("resolve_company", {"query": question})
+            if "tool_dispatch_failed" in limitations:
+                evidence.clear()
+                return finish("information_limit")
             company = _safe_resolution(resolved) if resolved is not None else None
             if company is None:
                 limitations.append("executive_pay_not_uniquely_disclosed")
@@ -8738,6 +8793,9 @@ class AgentRunner:
             corp = company["corp_code"]
             filings = pay_call("list_filings", dict(corp_code=corp, base_year=year,
                 base_month=12, doc_subtype="annual", latest_only=True, limit=2))
+            if "tool_dispatch_failed" in limitations:
+                evidence.clear()
+                return finish("information_limit")
             rows = filings.data if filings is not None else None
             if (not isinstance(rows, (list, tuple)) or len(rows) != 1
                     or not isinstance(rows[0], Mapping)
@@ -8824,6 +8882,9 @@ class AgentRunner:
                 audit.append(AuditEvent("final_generated", status="executive_pay_grounded"))
                 return self._result("completed", question_id, answer, context, evidence, calculations,
                     limitations, audit, lineage, model_calls, tool_calls)
+            if "tool_dispatch_failed" in limitations:
+                evidence.clear()
+                return finish("information_limit")
             limitations.append("executive_pay_not_uniquely_disclosed")
             return finish("information_limit")
 
@@ -8857,6 +8918,11 @@ class AgentRunner:
                 limitations.append("lineage_changed")
                 audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                 return finish("failed_closed")
+            if _is_backend_tool_error(sector_result):
+                limitations.append("tool_dispatch_failed")
+                audit.append(AuditEvent("tool_failed", tool_name="resolve_sector"))
+                evidence.clear()
+                return finish("information_limit")
             audit.append(
                 AuditEvent(
                     "tool_called",
@@ -8958,6 +9024,15 @@ class AgentRunner:
                         count=len(search_result.evidence),
                     )
                 )
+                if _is_backend_tool_error(search_result):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(
+                        AuditEvent(
+                            "tool_failed", tool_name="search_chunks"
+                        )
+                    )
+                    evidence.clear()
+                    return finish("information_limit")
                 if (
                     search_result.status != "ok"
                     or not search_result.evidence
@@ -9255,6 +9330,15 @@ class AgentRunner:
                         AuditEvent("failed_closed", status="lineage_changed")
                     )
                     return finish("failed_closed")
+                if _is_backend_tool_error(resolved_event_company):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(
+                        AuditEvent(
+                            "tool_failed", tool_name="resolve_company"
+                        )
+                    )
+                    evidence.clear()
+                    return finish("information_limit")
                 audit.append(
                     AuditEvent(
                         "tool_called",
@@ -9378,6 +9462,15 @@ class AgentRunner:
                                     )
                                 )
                                 return finish("failed_closed")
+                            if _is_backend_tool_error(event_result):
+                                limitations.append("tool_dispatch_failed")
+                                audit.append(
+                                    AuditEvent(
+                                        "tool_failed", tool_name="query_events"
+                                    )
+                                )
+                                evidence.clear()
+                                return finish("information_limit")
                             if (
                                 event_result.evidence
                                 and not _evidence_matches_company(
@@ -9474,6 +9567,16 @@ class AgentRunner:
                                             )
                                         )
                                         return finish("failed_closed")
+                                    if _is_backend_tool_error(funding_result):
+                                        limitations.append("tool_dispatch_failed")
+                                        audit.append(
+                                            AuditEvent(
+                                                "tool_failed",
+                                                tool_name="search_chunks",
+                                            )
+                                        )
+                                        evidence.clear()
+                                        return finish("information_limit")
                                     if (
                                         funding_result.evidence
                                         and not _evidence_matches_company(
@@ -9630,6 +9733,16 @@ class AgentRunner:
                                                 )
                                             )
                                             return finish("failed_closed")
+                                        if _is_backend_tool_error(missing_result):
+                                            limitations.append("tool_dispatch_failed")
+                                            audit.append(
+                                                AuditEvent(
+                                                    "tool_failed",
+                                                    tool_name="query_events",
+                                                )
+                                            )
+                                            evidence.clear()
+                                            return finish("information_limit")
                                         if (
                                             missing_result.evidence
                                             and not _evidence_matches_company(
@@ -9920,6 +10033,15 @@ class AgentRunner:
                                         )
                                     )
                                     return finish("failed_closed")
+                                if _is_backend_tool_error(search_result):
+                                    limitations.append("tool_dispatch_failed")
+                                    audit.append(
+                                        AuditEvent(
+                                            "tool_failed", tool_name="search_chunks"
+                                        )
+                                    )
+                                    evidence.clear()
+                                    return finish("information_limit")
                                 audit.append(
                                     AuditEvent(
                                         "tool_called",
@@ -10097,6 +10219,15 @@ class AgentRunner:
                                     )
                                 )
                                 return finish("failed_closed")
+                            if _is_backend_tool_error(event_result):
+                                limitations.append("tool_dispatch_failed")
+                                audit.append(
+                                    AuditEvent(
+                                        "tool_failed", tool_name="query_events"
+                                    )
+                                )
+                                evidence.clear()
+                                return finish("information_limit")
                             audit.append(
                                 AuditEvent(
                                     "tool_called",
@@ -10420,6 +10551,11 @@ class AgentRunner:
                     limitations.append("lineage_changed")
                     audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                     return finish("failed_closed")
+                if _is_backend_tool_error(resolved):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name="resolve_company"))
+                    evidence.clear()
+                    return finish("information_limit")
                 audit.append(
                     AuditEvent(
                         "tool_called",
@@ -10532,6 +10668,15 @@ class AgentRunner:
                                 )
                             )
                             return finish("failed_closed")
+                        if _is_backend_tool_error(scoped):
+                            limitations.append("tool_dispatch_failed")
+                            audit.append(
+                                AuditEvent(
+                                    "tool_failed", tool_name="search_chunks"
+                                )
+                            )
+                            evidence.clear()
+                            return finish("information_limit")
                         if scoped.evidence and not _evidence_matches_company(
                             scoped.evidence, company["corp_code"]
                         ):
@@ -10614,6 +10759,11 @@ class AgentRunner:
                                     else "malformed_tool_result"
                                 )
                                 return finish("failed_closed")
+                            if _is_backend_tool_error(extra_res):
+                                limitations.append("tool_dispatch_failed")
+                                audit.append(AuditEvent("tool_failed", tool_name="search_chunks"))
+                                evidence.clear()
+                                return finish("information_limit")
                             if not _evidence_matches_company(
                                 extra_res.evidence, company["corp_code"]
                             ):
@@ -11754,6 +11904,11 @@ class AgentRunner:
                 limitations.append("lineage_changed")
                 audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                 return finish("failed_closed")
+            if _is_backend_tool_error(history_result):
+                limitations.append("tool_dispatch_failed")
+                audit.append(AuditEvent("tool_failed", tool_name="get_history"))
+                evidence.clear()
+                return finish("information_limit")
             audit.append(
                 AuditEvent(
                     "tool_called",
@@ -11829,6 +11984,13 @@ class AgentRunner:
                         AuditEvent("failed_closed", status="lineage_changed")
                     )
                     return finish("failed_closed")
+                if _is_backend_tool_error(section_result):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(
+                        AuditEvent("tool_failed", tool_name="read_section")
+                    )
+                    evidence.clear()
+                    return finish("information_limit")
                 audit.append(
                     AuditEvent(
                         "tool_called",
@@ -11938,6 +12100,11 @@ class AgentRunner:
                     limitations.append("lineage_changed")
                     audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                     return finish("failed_closed")
+                if _is_backend_tool_error(dispatched):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name="search_chunks"))
+                    evidence.clear()
+                    return finish("information_limit")
                 audit.append(
                     AuditEvent(
                         "tool_called",
@@ -12095,6 +12262,15 @@ class AgentRunner:
                                     )
                                 )
                                 return finish("failed_closed")
+                            if _is_backend_tool_error(resolved):
+                                limitations.append("tool_dispatch_failed")
+                                audit.append(
+                                    AuditEvent(
+                                        "tool_failed", tool_name="resolve_company"
+                                    )
+                                )
+                                evidence.clear()
+                                return finish("information_limit")
                             audit.append(
                                 AuditEvent(
                                     "tool_called",
@@ -12159,6 +12335,13 @@ class AgentRunner:
                                     AuditEvent("failed_closed", status="lineage_changed")
                                 )
                                 return finish("failed_closed")
+                            if _is_backend_tool_error(scoped):
+                                limitations.append("tool_dispatch_failed")
+                                audit.append(
+                                    AuditEvent("tool_failed", tool_name="search_chunks")
+                                )
+                                evidence.clear()
+                                return finish("information_limit")
                             audit.append(
                                 AuditEvent(
                                     "tool_called",
@@ -12214,6 +12397,13 @@ class AgentRunner:
                                 AuditEvent("failed_closed", status="lineage_changed")
                             )
                             return finish("failed_closed")
+                        if _is_backend_tool_error(searched):
+                            limitations.append("tool_dispatch_failed")
+                            audit.append(
+                                AuditEvent("tool_failed", tool_name="search_chunks")
+                            )
+                            evidence.clear()
+                            return finish("information_limit")
                         audit.append(
                             AuditEvent(
                                 "tool_called",
@@ -12304,6 +12494,13 @@ class AgentRunner:
                             AuditEvent("failed_closed", status="lineage_changed")
                         )
                         return finish("failed_closed")
+                    if _is_backend_tool_error(dispatched):
+                        limitations.append("tool_dispatch_failed")
+                        audit.append(
+                            AuditEvent("tool_failed", tool_name="get_history")
+                        )
+                        evidence.clear()
+                        return finish("information_limit")
                     audit.append(
                         AuditEvent(
                             "tool_called",
@@ -12495,6 +12692,15 @@ class AgentRunner:
                                         )
                                     )
                                     return finish("failed_closed")
+                                if _is_backend_tool_error(section_result):
+                                    limitations.append("tool_dispatch_failed")
+                                    audit.append(
+                                        AuditEvent(
+                                            "tool_failed", tool_name="list_sections"
+                                        )
+                                    )
+                                    evidence.clear()
+                                    return finish("information_limit")
                                 receipt_owner = corp_by_receipt.get(target_rcept)
                                 if (
                                     receipt_owner is not None
@@ -12682,6 +12888,11 @@ class AgentRunner:
                     limitations.append("lineage_changed")
                     audit.append(AuditEvent("failed_closed", status="lineage_changed"))
                     return finish("failed_closed")
+                if _is_backend_tool_error(dispatched):
+                    limitations.append("tool_dispatch_failed")
+                    audit.append(AuditEvent("tool_failed", tool_name=call.name))
+                    evidence.clear()
+                    return finish("information_limit")
                 explicit_corp_code = args.get("corp_code")
                 target_receipt = args.get("rcept_no")
                 receipt_owner = (
@@ -12839,6 +13050,15 @@ class AgentRunner:
                                             )
                                         )
                                         return finish("failed_closed")
+                                    if _is_backend_tool_error(ev_dispatched):
+                                        limitations.append("tool_dispatch_failed")
+                                        audit.append(
+                                            AuditEvent(
+                                                "tool_failed", tool_name="query_events"
+                                            )
+                                        )
+                                        evidence.clear()
+                                        return finish("information_limit")
                                     if (
                                         ev_dispatched.evidence
                                         and not _evidence_matches_company(
@@ -12939,6 +13159,13 @@ class AgentRunner:
                                 AuditEvent("failed_closed", status="lineage_changed")
                             )
                             return finish("failed_closed")
+                        if _is_backend_tool_error(scoped):
+                            limitations.append("tool_dispatch_failed")
+                            audit.append(
+                                AuditEvent("tool_failed", tool_name="search_chunks")
+                            )
+                            evidence.clear()
+                            return finish("information_limit")
                         audit.append(
                             AuditEvent(
                                 "tool_called",

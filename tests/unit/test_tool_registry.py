@@ -740,3 +740,148 @@ def test_dispatch_discards_result_if_retrieval_lineage_changes_during_call(
 
     assert result.status == "error"
     assert result.error.code == "lineage_changed"
+
+
+class CustomStatusDisclosure(OversizedDisclosure):
+    def __init__(self, release, response_map: dict[str, dict]) -> None:
+        super().__init__(release)
+        self.response_map = response_map
+
+    def resolve_company(self, query: str) -> dict:
+        return self.response_map.get("resolve_company", {"status": "ok", "data": {"corp_code": "001"}})
+
+    def query_events(self, corp_code: str, **filters: object) -> dict:
+        return self.response_map.get("query_events", {"status": "ok", "data": [], "citations": [], "limitations": []})
+
+
+def test_resolve_company_argument_preserves_semantics_for_all_statuses(pipeline_fixture):
+    release = pipeline_fixture.resolve() / "releases" / "fixture"
+
+    # 1. not_found
+    backend = CustomStatusDisclosure(release, {
+        "resolve_company": {"status": "not_found", "data": [], "citations": [], "limitations": ["not found"]}
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_name": "없는회사"})
+    assert res.status == "not_found"
+    assert res.error is None
+
+    # 2. ambiguous
+    backend = CustomStatusDisclosure(release, {
+        "resolve_company": {"status": "ambiguous", "data": [], "citations": [], "limitations": ["multiple matches"]}
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_name": "현대"})
+    assert res.status == "ambiguous"
+    assert res.error is None
+
+    # 3. info_limit
+    backend = CustomStatusDisclosure(release, {
+        "resolve_company": {"status": "info_limit", "data": [], "citations": [], "limitations": ["info limit reached"]}
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_name": "현대"})
+    assert res.status == "info_limit"
+    assert res.error is None
+
+    # 4. error with trusted backend code (e.g. auth_error)
+    backend = CustomStatusDisclosure(release, {
+        "resolve_company": {
+            "status": "error",
+            "data": {},
+            "citations": [],
+            "limitations": ["OpenDART authentication failure (010) at /corpCode.xml"],
+            "error_code": "auth_error",
+        }
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_name": "현대"})
+    assert res.status == "error"
+    assert res.error is not None
+    assert res.error.code == "backend_auth_error"
+    assert res.error.code != "tool_rejected_arguments"
+    assert res.error.code != "not_found"
+
+
+def test_normalize_maps_trusted_backend_error_codes(pipeline_fixture):
+    release = pipeline_fixture.resolve() / "releases" / "fixture"
+
+    trusted_cases = [
+        ("auth_error", "backend_auth_error"),
+        ("quota_error", "backend_quota_error"),
+        ("service_error", "backend_service_error"),
+        ("transport_error", "backend_transport_error"),
+        ("malformed_response", "backend_malformed_response"),
+        ("api_error", "backend_api_error"),
+    ]
+
+    for backend_code, expected_dispatch_code in trusted_cases:
+        backend = CustomStatusDisclosure(release, {
+            "query_events": {
+                "status": "error",
+                "data": {},
+                "citations": [],
+                "limitations": [f"Failure for {backend_code}"],
+                "error_code": backend_code,
+            }
+        })
+        registry = ToolRegistry(backend, RetrievalStub(release))
+        res = registry.dispatch("query_events", {"corp_code": "001"})
+        assert res.status == "error"
+        assert res.error is not None
+        assert res.error.code == expected_dispatch_code
+        assert res.error.code != "tool_rejected_arguments"
+
+
+def test_normalize_rejects_untrusted_error_code_safely(pipeline_fixture):
+    release = pipeline_fixture.resolve() / "releases" / "fixture"
+
+    # Arbitrary string code
+    backend = CustomStatusDisclosure(release, {
+        "query_events": {
+            "status": "error",
+            "data": {},
+            "citations": [],
+            "limitations": ["Injected error"],
+            "error_code": "sql_injection_attempt_or_untrusted",
+        }
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_code": "001"})
+    assert res.status == "error"
+    assert res.error is not None
+    assert res.error.code == "malformed_tool_result"
+
+    # Non-string error_code
+    backend_non_str = CustomStatusDisclosure(release, {
+        "query_events": {
+            "status": "error",
+            "data": {},
+            "citations": [],
+            "limitations": ["Injected non-string"],
+            "error_code": 9999,
+        }
+    })
+    registry_non_str = ToolRegistry(backend_non_str, RetrievalStub(release))
+    res_non_str = registry_non_str.dispatch("query_events", {"corp_code": "001"})
+    assert res_non_str.status == "error"
+    assert res_non_str.error is not None
+    assert res_non_str.error.code == "malformed_tool_result"
+
+
+def test_normalize_generic_error_without_code_retains_tool_rejected_arguments(pipeline_fixture):
+    release = pipeline_fixture.resolve() / "releases" / "fixture"
+
+    backend = CustomStatusDisclosure(release, {
+        "query_events": {
+            "status": "error",
+            "data": {},
+            "citations": [],
+            "limitations": ["Generic rejection"],
+        }
+    })
+    registry = ToolRegistry(backend, RetrievalStub(release))
+    res = registry.dispatch("query_events", {"corp_code": "001"})
+    assert res.status == "error"
+    assert res.error is not None
+    assert res.error.code == "tool_rejected_arguments"
