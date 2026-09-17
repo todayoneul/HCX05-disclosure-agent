@@ -589,3 +589,111 @@ def test_sector_resolution_backend_error_prevents_cache_and_retries() -> None:
 
     assert exc_info2.value.category == "tool_dispatch_failed"
     assert service._cache.get(question_id, question, identity=identity) is None
+
+def test_structured_financial_search_answers_common_metrics_without_document_download() -> None:
+    corp_rows = [{"corp_code": "00126380", "corp_name": "삼성전자", "listed_name": "삼성전자", "stock_code": "005930", "sector": ""}]
+    financial_payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {
+                "rcept_no": "20240315000001",
+                "bsns_year": "2023",
+                "stock_code": "005930",
+                "reprt_code": "11011",
+                "account_nm": "매출액",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": "2023.01.01 ~ 2023.12.31",
+                "thstrm_amount": "258,935,494,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": "2022.01.01 ~ 2022.12.31",
+                "frmtrm_amount": "302,231,360,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": "2021.01.01 ~ 2021.12.31",
+                "bfefrmtrm_amount": "279,604,799,000,000",
+                "ord": "1",
+                "currency": "KRW",
+            },
+            {
+                "rcept_no": "20240315000001",
+                "bsns_year": "2023",
+                "stock_code": "005930",
+                "reprt_code": "11011",
+                "account_nm": "영업이익",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": "2023.01.01 ~ 2023.12.31",
+                "thstrm_amount": "6,566,976,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": "2022.01.01 ~ 2022.12.31",
+                "frmtrm_amount": "43,376,630,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": "2021.01.01 ~ 2021.12.31",
+                "bfefrmtrm_amount": "51,633,856,000,000",
+                "ord": "2",
+                "currency": "KRW",
+            },
+        ],
+    }
+
+    class StructuredFinancialClient(StubCatalogClient):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.document_calls: list[str] = []
+
+        def document_zip(self, rcept_no: str) -> bytes:
+            self.document_calls.append(rcept_no)
+            raise AssertionError("document_zip must NOT be called when structured financial data exists")
+
+    client = StructuredFinancialClient(corp_rows=corp_rows, json_payload=financial_payload)
+    service, runner, registry, identity = _make_service(client)
+
+    question_id = "Q-STRUCTURED-FINANCIAL-1"
+    question = "삼성전자의 2023년 연결 매출액 알려줘"
+
+    response = service.answer(question_id, question)
+    assert response.question_id == question_id
+    assert "258,935,494,000,000" in response.answer
+    assert len(client.document_calls) == 0  # Proves no document.xml download
+    assert "20240315000001" in response.retrieved_context
+
+    # Verify cached response
+    cached = service._cache.get(question_id, question, identity=identity)
+    assert cached is not None
+    assert cached.answer == response.answer
+
+
+def test_structured_financial_backend_error_prevents_cache_and_retries() -> None:
+    corp_rows = [{"corp_code": "00126380", "corp_name": "삼성전자", "listed_name": "삼성전자", "stock_code": "005930", "sector": ""}]
+    secret_key = "super-secret-key-structured-quota-fail"
+
+    client = StubCatalogClient(
+        corp_rows=corp_rows,
+        json_error=OpenDartQuotaError("/fnlttSinglAcnt.json", "020"),
+        secret=secret_key,
+    )
+    service, runner, registry, identity = _make_service(client)
+
+    question_id = "Q-STRUCTURED-FAIL-1"
+    question = "삼성전자의 2023년 연결 매출액 알려줘"
+
+    with pytest.raises(RuntimeTemporaryError) as exc_info1:
+        service.answer(question_id, question)
+
+    assert exc_info1.value.category == "tool_dispatch_failed"
+    assert secret_key not in str(exc_info1.value)
+    assert service._cache.get(question_id, question, identity=identity) is None
+
+    # Call 2: Retry should not hit cache
+    with pytest.raises(RuntimeTemporaryError) as exc_info2:
+        service.answer(question_id, question)
+
+    assert exc_info2.value.category == "tool_dispatch_failed"
+    assert service._cache.get(question_id, question, identity=identity) is None

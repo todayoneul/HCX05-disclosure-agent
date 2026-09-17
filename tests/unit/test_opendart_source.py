@@ -930,3 +930,533 @@ def test_search_chunks_propagates_resolve_company_backend_error(tmp_path: Path) 
     res_trans = source_transport.search_chunks("배터리 신기술")
     assert res_trans["status"] == "error"
     assert res_trans.get("error_code") == "transport_error"
+
+
+def _sample_financial_accounts_payload(
+    rcept_no: str = "20240315000001",
+    bsns_year: str = "2023",
+    reprt_code: str = "11011",
+    currency: str = "KRW",
+) -> dict[str, Any]:
+    return {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "유동자산",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "BS",
+                "sj_nm": "재무상태표",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.12.31 현재",
+                "thstrm_amount": "80,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.12.31 현재",
+                "frmtrm_amount": "75,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.12.31 현재",
+                "bfefrmtrm_amount": "70,000,000,000",
+                "ord": "1",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "자산총계",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "BS",
+                "sj_nm": "재무상태표",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.12.31 현재",
+                "thstrm_amount": "200,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.12.31 현재",
+                "frmtrm_amount": "180,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.12.31 현재",
+                "bfefrmtrm_amount": "160,000,000,000",
+                "ord": "2",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "부채총계",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "BS",
+                "sj_nm": "재무상태표",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.12.31 현재",
+                "thstrm_amount": "80,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.12.31 현재",
+                "frmtrm_amount": "70,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.12.31 현재",
+                "bfefrmtrm_amount": "60,000,000,000",
+                "ord": "3",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "자본총계",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "BS",
+                "sj_nm": "재무상태표",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.12.31 현재",
+                "thstrm_amount": "120,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.12.31 현재",
+                "frmtrm_amount": "110,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.12.31 현재",
+                "bfefrmtrm_amount": "100,000,000,000",
+                "ord": "4",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "매출액",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.01.01 ~ {bsns_year}.12.31",
+                "thstrm_amount": "150,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.01.01 ~ {int(bsns_year)-1}.12.31",
+                "frmtrm_amount": "140,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.01.01 ~ {int(bsns_year)-2}.12.31",
+                "bfefrmtrm_amount": "130,000,000,000",
+                "ord": "5",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "영업이익",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.01.01 ~ {bsns_year}.12.31",
+                "thstrm_amount": "15,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.01.01 ~ {int(bsns_year)-1}.12.31",
+                "frmtrm_amount": "12,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.01.01 ~ {int(bsns_year)-2}.12.31",
+                "bfefrmtrm_amount": "10,000,000,000",
+                "ord": "6",
+                "currency": currency,
+            },
+            {
+                "rcept_no": rcept_no,
+                "bsns_year": bsns_year,
+                "stock_code": "005380",
+                "reprt_code": reprt_code,
+                "account_nm": "당기순이익",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": f"{bsns_year}.01.01 ~ {bsns_year}.12.31",
+                "thstrm_amount": "10,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": f"{int(bsns_year)-1}.01.01 ~ {int(bsns_year)-1}.12.31",
+                "frmtrm_amount": "8,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": f"{int(bsns_year)-2}.01.01 ~ {int(bsns_year)-2}.12.31",
+                "bfefrmtrm_amount": "7,000,000,000",
+                "ord": "7",
+                "currency": currency,
+            },
+        ],
+    }
+
+
+def test_client_single_financial_accounts_input_validation() -> None:
+    config = OpenDartConfig(api_key="fixture-key")
+    client = OpenDartClient(config, session=QueueSession())
+
+    with pytest.raises(ValueError, match="corp_code"):
+        client.single_financial_accounts("123", 2023, "11011")
+
+    with pytest.raises(ValueError, match="bsns_year"):
+        client.single_financial_accounts("00126380", 2014, "11011")
+
+    with pytest.raises(ValueError, match="reprt_code"):
+        client.single_financial_accounts("00126380", 2023, "99999")
+
+
+def test_client_multi_financial_accounts_input_validation() -> None:
+    config = OpenDartConfig(api_key="fixture-key")
+    client = OpenDartClient(config, session=QueueSession())
+
+    with pytest.raises(ValueError, match="corp_codes"):
+        client.multi_financial_accounts([], 2023, "11011")
+
+    with pytest.raises(ValueError, match="100"):
+        client.multi_financial_accounts(["00126380"] * 101, 2023, "11011")
+
+    with pytest.raises(ValueError, match="corp_code"):
+        client.multi_financial_accounts(["00126380", "bad_code"], 2023, "11011")
+
+    with pytest.raises(ValueError, match="bsns_year"):
+        client.multi_financial_accounts(["00126380"], 2010, "11011")
+
+    with pytest.raises(ValueError, match="reprt_code"):
+        client.multi_financial_accounts(["00126380"], 2023, "99999")
+
+
+def test_client_single_and_multi_financial_accounts_success() -> None:
+    config = OpenDartConfig(api_key="secret-api-key")
+    single_payload = _sample_financial_accounts_payload()
+    multi_payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {"corp_code": "00126380", "account_nm": "매출액", "thstrm_amount": "100"},
+            {"corp_code": "00164779", "account_nm": "매출액", "thstrm_amount": "200"},
+        ],
+    }
+    session = QueueSession([
+        FakeResponse(json.dumps(single_payload).encode("utf-8")),
+        FakeResponse(json.dumps(multi_payload).encode("utf-8")),
+    ])
+    client = OpenDartClient(config, session=session)
+
+    single_rows = client.single_financial_accounts("00126380", 2023, "11011")
+    assert len(single_rows) == 7
+    assert session.calls[0][0].endswith("/fnlttSinglAcnt.json")
+    assert session.calls[0][1]["params"]["corp_code"] == "00126380"
+    assert session.calls[0][1]["params"]["bsns_year"] == "2023"
+    assert session.calls[0][1]["params"]["reprt_code"] == "11011"
+    assert session.calls[0][1]["params"]["crtfc_key"] == "secret-api-key"
+
+    multi_rows = client.multi_financial_accounts(["00126380", "00164779"], 2023, "11011")
+    assert len(multi_rows) == 2
+    assert session.calls[1][0].endswith("/fnlttMultiAcnt.json")
+    assert session.calls[1][1]["params"]["corp_code"] == "00126380,00164779"
+
+
+def test_client_financial_accounts_no_data_and_typed_error_propagation() -> None:
+    config = OpenDartConfig(api_key="secret-key")
+    session = QueueSession([
+        FakeResponse(b'{"status":"013","message":"no data"}'),
+        FakeResponse(b'{"status":"020","message":"quota exceeded"}'),
+    ])
+    client = OpenDartClient(config, session=session)
+
+    assert client.single_financial_accounts("00126380", 2023, "11011") == []
+
+    with pytest.raises(OpenDartQuotaError) as exc_info:
+        client.single_financial_accounts("00126380", 2023, "11011")
+    assert exc_info.value.error_code == "quota_error"
+    assert "secret-key" not in str(exc_info.value)
+
+
+def test_source_single_and_multi_financial_accounts(tmp_path: Path) -> None:
+    single_payload = _sample_financial_accounts_payload()
+    multi_payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {"corp_code": "00126380", "account_nm": "매출액", "thstrm_amount": "100"},
+            {"corp_code": "00164779", "account_nm": "매출액", "thstrm_amount": "200"},
+        ],
+    }
+    client = StubOpenDartClient(payloads=[single_payload, multi_payload])
+    source = _source_with_universe(client, tmp_path)
+
+    single_res = source.single_financial_accounts("00126380", 2023, "11011")
+    assert single_res["status"] == "ok"
+    assert len(single_res["data"]) == 7
+    assert single_res["source"]["endpoint"] == "/fnlttSinglAcnt.json"
+
+    multi_res = source.multi_financial_accounts(["00126380", "00164779"], 2023, "11011")
+    assert multi_res["status"] == "ok"
+    assert len(multi_res["data"]) == 2
+    assert multi_res["source"]["endpoint"] == "/fnlttMultiAcnt.json"
+
+
+def test_search_chunks_prefers_structured_financial_accounts_without_document_download(tmp_path: Path) -> None:
+    single_payload = _sample_financial_accounts_payload(
+        rcept_no="20240315000001",
+        bsns_year="2023",
+        reprt_code="11011",
+    )
+    # Stub client has structured payload, NO document zip provided!
+    client = StubOpenDartClient(payloads=[single_payload])
+    source = _source_with_universe(client, tmp_path)
+
+    res = source.search_chunks(
+        "현대자동차 2023년 사업보고서 연결 매출액 영업이익",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        path_hint="연결",
+        k=5,
+    )
+
+    assert res["status"] == "ok"
+    assert len(client.document_calls) == 0  # CRITICAL: document.xml was NOT downloaded!
+    assert any(call[0] == "/fnlttSinglAcnt.json" for call in client.json_calls)
+    assert len(res["data"]) > 0
+
+    # Verify structured evidence format
+    chunk = res["data"][0]
+    assert "매출액" in chunk["text"]
+    assert "150,000,000,000" in chunk["text"]
+    assert "단위" in chunk["text"]
+    assert chunk["citation"]["rcept_no"] == "20240315000001"
+    assert "손익계산서" in chunk["path"] or "재무상태표" in chunk["path"]
+
+
+def test_search_chunks_structured_preserves_quarterly_cumulative_fields(tmp_path: Path) -> None:
+    q3_payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {
+                "rcept_no": "20231114000001",
+                "bsns_year": "2023",
+                "stock_code": "005380",
+                "reprt_code": "11014",
+                "account_nm": "매출액",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기 3분기",
+                "thstrm_dt": "2023.07.01 ~ 2023.09.30",
+                "thstrm_amount": "40,000,000,000",
+                "thstrm_add_amount": "120,000,000,000",
+                "frmtrm_nm": "제 54 기 3분기",
+                "frmtrm_dt": "2022.07.01 ~ 2022.09.30",
+                "frmtrm_amount": "35,000,000,000",
+                "frmtrm_add_amount": "105,000,000,000",
+                "bfefrmtrm_nm": "",
+                "bfefrmtrm_dt": "",
+                "bfefrmtrm_amount": "",
+                "ord": "1",
+                "currency": "KRW",
+            }
+        ],
+    }
+    client = StubOpenDartClient(payloads=[q3_payload])
+    source = _source_with_universe(client, tmp_path)
+
+    res = source.search_chunks(
+        "현대자동차 2023년 3분기 누적 연결 매출액",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="quarter",
+        base_month=9,
+        k=5,
+    )
+
+    assert res["status"] == "ok"
+    assert len(client.document_calls) == 0
+    chunk = res["data"][0]
+    # Check 3개월 and 누적 are preserved in markdown table
+    assert "3개월" in chunk["text"]
+    assert "누적" in chunk["text"]
+    assert "40,000,000,000" in chunk["text"]
+    assert "120,000,000,000" in chunk["text"]
+
+
+def test_search_chunks_falls_back_to_document_on_structured_no_data(tmp_path: Path) -> None:
+    receipt = "20240315000001"
+    no_data_payload = {"status": "013", "message": "조회된 데이터가 없습니다"}
+    filing_list_payload = _list_payload([_filing_row(receipt, report_nm="사업보고서 (2023.12)")])
+    doc_zip = _zip_member("report.xml", "<p>현대자동차 연결 매출액 150조원</p>")
+
+    client = StubOpenDartClient(
+        payloads=[no_data_payload, filing_list_payload],
+        documents={receipt: doc_zip},
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    res = source.search_chunks(
+        "현대자동차 2023년 연결 매출액",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        k=5,
+    )
+
+    assert res["status"] == "ok"
+    # Fallback to document.xml occurred because structured accounts returned 013
+    assert len(client.document_calls) == 1
+    assert client.document_calls[0] == receipt
+
+
+def test_search_chunks_propagates_structured_backend_error_without_fallback(tmp_path: Path) -> None:
+    quota_err = OpenDartQuotaError("/fnlttSinglAcnt.json", "020")
+    # Simulate client whose json() raises OpenDartQuotaError on /fnlttSinglAcnt.json
+    class QuotaFailingClient(StubOpenDartClient):
+        def json(self, endpoint: str, params: dict[str, object]) -> dict[str, Any]:
+            if endpoint == "/fnlttSinglAcnt.json":
+                raise quota_err
+            return super().json(endpoint, params)
+
+    client = QuotaFailingClient()
+    source = _source_with_universe(client, tmp_path)
+
+    res = source.search_chunks(
+        "현대자동차 2023년 사업보고서 연결 매출액",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+    )
+
+    assert res["status"] == "error"
+    assert res.get("error_code") == "quota_error"
+    assert len(client.document_calls) == 0  # MUST NOT fall back to document.xml!
+
+def test_client_financial_accounts_malformed_entries() -> None:
+    config = OpenDartConfig(api_key="fixture-key")
+    session = QueueSession([
+        FakeResponse(b'{"status":"000","message":"ok","list":["not-a-dict"]}'),
+        FakeResponse(b'{"status":"000","message":"ok","list":["not-a-dict"]}'),
+    ])
+    client = OpenDartClient(config, session=session)
+
+    with pytest.raises(OpenDartMalformedResponse):
+        client.single_financial_accounts("00126380", 2023, "11011")
+
+    with pytest.raises(OpenDartMalformedResponse):
+        client.multi_financial_accounts(["00126380"], 2023, "11011")
+
+
+def test_search_chunks_structured_cfs_vs_ofs_selection(tmp_path: Path) -> None:
+    payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {
+                "rcept_no": "20240315000001",
+                "bsns_year": "2023",
+                "stock_code": "005380",
+                "reprt_code": "11011",
+                "account_nm": "매출액",
+                "fs_div": "CFS",
+                "fs_nm": "연결재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": "2023.01.01 ~ 2023.12.31",
+                "thstrm_amount": "150,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": "2022.01.01 ~ 2022.12.31",
+                "frmtrm_amount": "140,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": "2021.01.01 ~ 2021.12.31",
+                "bfefrmtrm_amount": "130,000,000,000",
+                "ord": "1",
+                "currency": "KRW",
+            },
+            {
+                "rcept_no": "20240315000001",
+                "bsns_year": "2023",
+                "stock_code": "005380",
+                "reprt_code": "11011",
+                "account_nm": "매출액",
+                "fs_div": "OFS",
+                "fs_nm": "재무제표",
+                "sj_div": "IS",
+                "sj_nm": "손익계산서",
+                "thstrm_nm": "제 55 기",
+                "thstrm_dt": "2023.01.01 ~ 2023.12.31",
+                "thstrm_amount": "70,000,000,000",
+                "frmtrm_nm": "제 54 기",
+                "frmtrm_dt": "2022.01.01 ~ 2022.12.31",
+                "frmtrm_amount": "65,000,000,000",
+                "bfefrmtrm_nm": "제 53 기",
+                "bfefrmtrm_dt": "2021.01.01 ~ 2021.12.31",
+                "bfefrmtrm_amount": "60,000,000,000",
+                "ord": "2",
+                "currency": "KRW",
+            },
+        ],
+    }
+
+    # Query with 별도 should prefer OFS
+    client = StubOpenDartClient(payloads=[dict(payload)])
+    source = _source_with_universe(client, tmp_path)
+    res_ofs = source.search_chunks(
+        "현대자동차 2023년 별도 매출액",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        k=2,
+    )
+    assert res_ofs["status"] == "ok"
+    assert "재무제표 > 손익계산서" in res_ofs["data"][0]["path"]
+    assert "70,000,000,000" in res_ofs["data"][0]["text"]
+
+    # Query with 연결 should prefer CFS
+    client2 = StubOpenDartClient(payloads=[dict(payload)])
+    source2 = _source_with_universe(client2, tmp_path)
+    res_cfs = source2.search_chunks(
+        "현대자동차 2023년 연결 매출액",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        k=2,
+    )
+    assert res_cfs["status"] == "ok"
+    assert "연결재무제표 > 손익계산서" in res_cfs["data"][0]["path"]
+    assert "150,000,000,000" in res_cfs["data"][0]["text"]
+
+
+def test_search_chunks_broad_narrative_query_falls_back_to_document(tmp_path: Path) -> None:
+    receipt = "20240315000001"
+    filing_list_payload = _list_payload([_filing_row(receipt, report_nm="사업보고서 (2023.12)")])
+    doc_zip = _zip_member("report.xml", "<p>현대자동차 2023년 실적 및 사업 현황에 대한 전반적 분석 내용입니다.</p>")
+
+    # Client has only list.json and document.xml; /fnlttSinglAcnt.json must NOT be triggered
+    client = StubOpenDartClient(
+        payloads=[filing_list_payload],
+        documents={receipt: doc_zip},
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    # Narrative query that mentions broad "실적" or "재무" without naming a specific financial account
+    res = source.search_chunks(
+        "현대자동차 2023년 실적 및 사업 추진 현황 설명",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        k=5,
+    )
+
+    assert res["status"] == "ok"
+    assert len(client.document_calls) == 1
+    assert not any(call[0] == "/fnlttSinglAcnt.json" for call in client.json_calls)

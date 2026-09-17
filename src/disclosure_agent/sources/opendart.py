@@ -49,6 +49,20 @@ _BLOCK_TAGS = frozenset(
     {"address", "article", "br", "caption", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "p", "pre", "section", "td", "th", "tr"}
 )
 _REPORT_CODE_BY_MONTH = {3: "11013", 6: "11012", 9: "11014", 12: "11011"}
+_REPRT_CODES = frozenset({"11013", "11012", "11014", "11011"})
+_FINANCIAL_METRIC_MARKERS = frozenset(
+    {
+        "매출액", "매출", "영업수익", "수익",
+        "영업이익", "영업손익", "영업손실",
+        "당기순이익", "당기순손익", "당기순손실", "순이익", "순손실",
+        "자산총계", "자산", "유동자산", "비유동자산",
+        "부채총계", "부채", "유동부채", "비유동부채",
+        "자본총계", "자본", "자본금", "이익잉여금",
+        "법인세차감전순이익", "법인세비용차감전순이익",
+        "재무상태표", "손익계산서", "포괄손익계산서",
+        "부채비율", "유동비율", "roe", "영업이익률",
+    }
+)
 _GROUP_BY_PBLNTF = {"A": "periodic", "B": "major", "D": "holding", "I": "exchange"}
 _DETAIL_BY_SUBTYPE = {
     "annual": "A001",
@@ -376,7 +390,67 @@ class OpenDartClient:
                                 "stock_code": stock_code,
                                 "sector": "",
                             })
-        return rows
+        return [dict(row) for row in rows]
+
+    def single_financial_accounts(
+        self,
+        corp_code: str,
+        bsns_year: str | int,
+        reprt_code: str,
+    ) -> list[dict[str, Any]]:
+        code = str(corp_code or "").strip()
+        if not _safe_digits(code, length=8):
+            raise ValueError(f"corp_code must be an 8-digit string, got: {corp_code!r}")
+        year_str = str(bsns_year or "").strip()
+        if not _safe_digits(year_str, length=4) or int(year_str) < 2015 or int(year_str) > 2100:
+            raise ValueError(f"bsns_year must be a 4-digit year from 2015, got: {bsns_year!r}")
+        if not isinstance(reprt_code, str) or reprt_code not in _REPRT_CODES:
+            raise ValueError(f"reprt_code must be one of {sorted(_REPRT_CODES)}, got: {reprt_code!r}")
+        payload = self.json(
+            "/fnlttSinglAcnt.json",
+            {"corp_code": code, "bsns_year": year_str, "reprt_code": reprt_code},
+        )
+        status = payload.get("status")
+        if status in {"013", "014"}:
+            return []
+        rows = payload.get("list")
+        if not isinstance(rows, list) or any(not isinstance(r, Mapping) for r in rows):
+            raise OpenDartMalformedResponse("/fnlttSinglAcnt.json")
+        return [dict(row) for row in rows]
+
+    def multi_financial_accounts(
+        self,
+        corp_codes: str | list[str] | tuple[str, ...],
+        bsns_year: str | int,
+        reprt_code: str,
+    ) -> list[dict[str, Any]]:
+        if isinstance(corp_codes, str):
+            codes = [c.strip() for c in corp_codes.split(",") if c.strip()]
+        elif isinstance(corp_codes, (list, tuple)):
+            codes = [str(c).strip() for c in corp_codes if str(c).strip()]
+        else:
+            raise ValueError("corp_codes must be a comma-delimited string or sequence of 8-digit corp_codes")
+        if not codes or len(codes) > 100:
+            raise ValueError(f"corp_codes count must be 1..100, got: {len(codes)}")
+        for code in codes:
+            if not _safe_digits(code, length=8):
+                raise ValueError(f"corp_code must be an 8-digit string, got: {code!r}")
+        year_str = str(bsns_year or "").strip()
+        if not _safe_digits(year_str, length=4) or int(year_str) < 2015 or int(year_str) > 2100:
+            raise ValueError(f"bsns_year must be a 4-digit year from 2015, got: {bsns_year!r}")
+        if not isinstance(reprt_code, str) or reprt_code not in _REPRT_CODES:
+            raise ValueError(f"reprt_code must be one of {sorted(_REPRT_CODES)}, got: {reprt_code!r}")
+        payload = self.json(
+            "/fnlttMultiAcnt.json",
+            {"corp_code": ",".join(codes), "bsns_year": year_str, "reprt_code": reprt_code},
+        )
+        status = payload.get("status")
+        if status in {"013", "014"}:
+            return []
+        rows = payload.get("list")
+        if not isinstance(rows, list) or any(not isinstance(r, Mapping) for r in rows):
+            raise OpenDartMalformedResponse("/fnlttMultiAcnt.json")
+        return [dict(row) for row in rows]
 
     def close(self) -> None:
         close = getattr(self._session, "close", None)
@@ -528,6 +602,209 @@ def _decode_content(raw: bytes) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
+def _format_accounting_number(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    s = str(value).strip()
+    if not s or s == "-":
+        return "-"
+    is_neg = s.startswith("-") or (s.startswith("(") and s.endswith(")"))
+    digits = re.sub(r"[^0-9.]", "", s)
+    if not digits:
+        return s
+    try:
+        if "." in digits:
+            integer_part, decimal_part = digits.split(".", 1)
+            formatted = f"{int(integer_part):,}.{decimal_part}"
+        else:
+            formatted = f"{int(digits):,}"
+        return f"-{formatted}" if is_neg else formatted
+    except ValueError:
+        return s
+
+
+def _is_financial_query(query: str, path_hint: str | None = None) -> bool:
+    folded = query.casefold()
+    if any(term in folded for term in _FINANCIAL_METRIC_MARKERS):
+        return True
+    if path_hint and any(term in path_hint for term in ("재무상태표", "손익계산서", "포괄손익계산서")):
+        return True
+    return False
+
+
+def _financial_period_line(label: str, name: object, period: object) -> str:
+    details = " · ".join(
+        value for value in (_compact(name), _compact(period)) if value
+    )
+    return f"{label}: {details}" if details else ""
+
+
+def _financial_row_order(row: Mapping[str, Any]) -> tuple[int, str]:
+    raw_order = str(row.get("ord") or "").strip()
+    try:
+        order = int(raw_order)
+    except ValueError:
+        order = 2**31 - 1
+    return order, _compact(row.get("account_nm"))
+
+
+def _build_structured_financial_chunks(
+    rows: list[dict[str, Any]],
+    *,
+    corp_code: str,
+    corp_name: str,
+    bsns_year: int | str,
+    reprt_code: str,
+    query: str,
+    path_hint: str | None = None,
+    k: int = 10,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    rcept_no = str(rows[0].get("rcept_no") or "").strip()
+    if not rcept_no:
+        return []
+
+    month = 12 if reprt_code == "11011" else 6 if reprt_code == "11012" else 3 if reprt_code == "11013" else 9
+    report_prefix = "사업" if reprt_code == "11011" else ("반기" if reprt_code == "11012" else "분기")
+    report_nm = f"{report_prefix}보고서 ({bsns_year}.{month:02d})"
+    doc_id = f"opendart-{rcept_no}"
+    rcept_dt = rcept_no[:8]
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        fs_div = str(row.get("fs_div") or "CFS").upper()
+        if fs_div not in {"CFS", "OFS"}:
+            fs_div = "CFS" if "연결" in str(row.get("fs_nm") or "") else "OFS"
+        sj_div = str(row.get("sj_div") or "IS").upper()
+        if sj_div not in {"BS", "IS", "CIS"}:
+            sj_div = "BS" if "상태" in str(row.get("sj_nm") or "") else "IS"
+        norm_sj = "BS" if sj_div == "BS" else "IS"
+        grouped.setdefault((fs_div, norm_sj), []).append(row)
+
+    candidates: list[dict[str, Any]] = []
+    folded_query = query.casefold()
+    wants_cfs = "연결" in folded_query or "consolidated" in folded_query
+    wants_ofs = any(m in folded_query for m in ("별도", "개별", "separate", "individual"))
+    wants_is = any(m in folded_query for m in ("손익", "매출", "수익", "영업이익", "영업손익", "순이익", "순손익", "이익률"))
+    wants_bs = any(m in folded_query for m in ("재무상태", "자산", "부채", "자본", "부채비율", "유동비율"))
+
+    for (fs_div, sj_div), group_rows in grouped.items():
+        if wants_cfs and not wants_ofs and fs_div != "CFS":
+            continue
+        if wants_ofs and not wants_cfs and fs_div != "OFS":
+            continue
+        if wants_is and not wants_bs and sj_div != "IS":
+            continue
+        if wants_bs and not wants_is and sj_div != "BS":
+            continue
+
+        group_rows.sort(key=_financial_row_order)
+        fs_label = "연결재무제표" if fs_div == "CFS" else "재무제표"
+        sj_label = "손익계산서" if sj_div == "IS" else "재무상태표"
+        section_path = f"{fs_label} > {sj_label}"
+        if path_hint and path_hint not in section_path:
+            continue
+
+        raw_curr = group_rows[0].get("currency") or "KRW"
+        unit_label = "원" if raw_curr in {"KRW", "원"} else str(raw_curr)
+
+        first_row = group_rows[0]
+        period_lines = [
+            _financial_period_line(
+                "당기", first_row.get("thstrm_nm"), first_row.get("thstrm_dt")
+            ),
+            _financial_period_line(
+                "전기", first_row.get("frmtrm_nm"), first_row.get("frmtrm_dt")
+            ),
+            _financial_period_line(
+                "전전기",
+                first_row.get("bfefrmtrm_nm"),
+                first_row.get("bfefrmtrm_dt"),
+            ),
+        ]
+        lines: list[str] = [
+            f"[{section_path}]",
+            *(line for line in period_lines if line),
+            f"(단위 : {unit_label})",
+        ]
+        if reprt_code == "11011":
+            lines.append("| 계정과목 | 당기 | 전기 | 전전기 |")
+            lines.append("|---|---|---|---|")
+            for r in group_rows:
+                nm = str(r.get("account_nm") or "").strip()
+                th = _format_accounting_number(r.get("thstrm_amount"))
+                fr = _format_accounting_number(r.get("frmtrm_amount"))
+                bfe = _format_accounting_number(r.get("bfefrmtrm_amount"))
+                lines.append(f"| {nm} | {th} | {fr} | {bfe} |")
+        else:
+            quarter_label = "반기" if reprt_code == "11012" else "1분기" if reprt_code == "11013" else "3분기"
+            if sj_div == "IS":
+                lines.append(
+                    f"| 계정과목 | 당기 {quarter_label} 3개월 | 당기 {quarter_label} 누적 | "
+                    f"전기 {quarter_label} 3개월 | 전기 {quarter_label} 누적 |"
+                )
+                lines.append("|---|---|---|---|---|")
+                for r in group_rows:
+                    nm = str(r.get("account_nm") or "").strip()
+                    th_3m = _format_accounting_number(r.get("thstrm_amount"))
+                    th_cum = _format_accounting_number(r.get("thstrm_add_amount") or r.get("thstrm_amount"))
+                    fr_3m = _format_accounting_number(r.get("frmtrm_amount"))
+                    fr_cum = _format_accounting_number(r.get("frmtrm_add_amount") or r.get("frmtrm_amount"))
+                    lines.append(f"| {nm} | {th_3m} | {th_cum} | {fr_3m} | {fr_cum} |")
+            else:
+                lines.append(f"| 계정과목 | 당기 {quarter_label}말 | 전기말 |")
+                lines.append("|---|---|---|")
+                for r in group_rows:
+                    nm = str(r.get("account_nm") or "").strip()
+                    th = _format_accounting_number(r.get("thstrm_amount"))
+                    fr = _format_accounting_number(r.get("frmtrm_amount"))
+                    lines.append(f"| {nm} | {th} | {fr} |")
+
+        table_text = chr(10).join(lines)
+
+        score = -100.0
+        if wants_cfs:
+            score += -50.0 if fs_div == "CFS" else 50.0
+        elif wants_ofs:
+            score += -50.0 if fs_div == "OFS" else 50.0
+        else:
+            score += -20.0 if fs_div == "CFS" else 0.0
+
+        if wants_is:
+            score += -30.0 if sj_div == "IS" else 0.0
+        if wants_bs:
+            score += -30.0 if sj_div == "BS" else 0.0
+
+        citation = _citation(
+            {
+                "doc_id": doc_id,
+                "rcept_no": rcept_no,
+                "corp_code": corp_code,
+                "corp_name": corp_name,
+                "report_nm": report_nm,
+                "rcept_dt": rcept_dt,
+                "is_latest": True,
+                "root_rcept_no": rcept_no,
+                "latest_rcept_no": rcept_no,
+                "correction_status": "original",
+                "correction_method": "",
+            },
+            section=section_path,
+        )
+        candidates.append({
+            "chunk_id": f"{doc_id}:{section_path}:1",
+            "doc_id": doc_id,
+            "path": section_path,
+            "text": table_text,
+            "score": score,
+            "citation": citation,
+        })
+
+    candidates.sort(key=lambda item: item["score"])
+    return candidates[:k]
+
+
 class OpenDartSource:
     """Implement DisclosureTools and RetrievalIndex methods over OpenDART.
 
@@ -582,6 +859,54 @@ class OpenDartSource:
                 endpoint="/corpCode.xml",
             )
         return self.company_resolver.resolve_company(query)
+
+    def _resolve_corp_name(self, corp_code: str, fallback_query: str = "") -> str:
+        if self.company_resolver is not None:
+            if corp_code:
+                resolved = self.company_resolver.resolve_company(corp_code)
+                if resolved.get("status") == "ok":
+                    name = str(resolved["data"].get("corp_name") or "").strip()
+                    if name:
+                        return name
+            if fallback_query:
+                resolved = self.company_resolver.resolve_company(fallback_query)
+                if resolved.get("status") == "ok":
+                    name = str(resolved["data"].get("corp_name") or "").strip()
+                    if name:
+                        return name
+        return corp_code or "기업"
+
+    def single_financial_accounts(
+        self,
+        corp_code: str,
+        bsns_year: str | int,
+        reprt_code: str,
+    ) -> dict[str, Any]:
+        try:
+            rows = self.client.single_financial_accounts(corp_code, bsns_year, reprt_code)
+            return _source_result(
+                "ok" if rows else "not_found",
+                rows,
+                endpoint="/fnlttSinglAcnt.json",
+            )
+        except OpenDartError as exc:
+            return self._failure(exc)
+
+    def multi_financial_accounts(
+        self,
+        corp_codes: str | list[str] | tuple[str, ...],
+        bsns_year: str | int,
+        reprt_code: str,
+    ) -> dict[str, Any]:
+        try:
+            rows = self.client.multi_financial_accounts(corp_codes, bsns_year, reprt_code)
+            return _source_result(
+                "ok" if rows else "not_found",
+                rows,
+                endpoint="/fnlttMultiAcnt.json",
+            )
+        except OpenDartError as exc:
+            return self._failure(exc)
 
     def resolve_sector(self, query: str) -> dict:
         return _source_result("info_limit", [], limitations=["OpenDART company catalog does not provide sector membership"], endpoint="/corpCode.xml")
@@ -1201,6 +1526,71 @@ class OpenDartSource:
         path_hint = filters.get("path_hint")
         if path_hint is not None and not isinstance(path_hint, str):
             return _source_result("error", {}, limitations=["path_hint must be a string"])
+
+        target_year: int | None = None
+        if base_year is not None and isinstance(base_year, int) and 2015 <= base_year <= 2100:
+            target_year = base_year
+        elif base_year is None:
+            extracted_years = [int(y) for y in _YEAR_RE.findall(query) if 2015 <= int(y) <= 2100]
+            if len(extracted_years) == 1:
+                target_year = extracted_years[0]
+
+        target_reprt_code: str | None = None
+        if doc_subtype == "annual" or base_month == 12:
+            target_reprt_code = "11011"
+        elif doc_subtype == "half" or base_month == 6:
+            target_reprt_code = "11012"
+        elif doc_subtype == "quarter":
+            if base_month == 3 or "1분기" in query or "1/4" in query:
+                target_reprt_code = "11013"
+            elif base_month == 9 or "3분기" in query or "3/4" in query:
+                target_reprt_code = "11014"
+        elif base_month in _REPORT_CODE_BY_MONTH:
+            target_reprt_code = _REPORT_CODE_BY_MONTH[base_month]
+        else:
+            if "반기" in query:
+                target_reprt_code = "11012"
+            elif "1분기" in query or "1/4분기" in query:
+                target_reprt_code = "11013"
+            elif "3분기" in query or "3/4분기" in query:
+                target_reprt_code = "11014"
+            elif "사업보고서" in query or ("연간" in query or "사업연도" in query) or (target_year is not None and not any(q in query for q in ("분기", "반기")) and doc_subtype is None):
+                target_reprt_code = "11011"
+
+        st_corp_code = corp_code if len(corp_code) == 8 else (corp_code.zfill(8) if corp_code.isdigit() and len(corp_code) < 8 else "")
+        if (
+            target_year is not None
+            and target_reprt_code is not None
+            and _safe_digits(st_corp_code, length=8)
+            and _is_financial_query(query, path_hint)
+        ):
+            try:
+                st_rows = self.client.single_financial_accounts(
+                    corp_code=st_corp_code,
+                    bsns_year=target_year,
+                    reprt_code=target_reprt_code,
+                )
+            except OpenDartError as exc:
+                return self._failure(exc)
+            if st_rows:
+                corp_name = self._resolve_corp_name(corp_code, query)
+                structured_chunks = _build_structured_financial_chunks(
+                    st_rows,
+                    corp_code=st_corp_code,
+                    corp_name=corp_name,
+                    bsns_year=target_year,
+                    reprt_code=target_reprt_code,
+                    query=query,
+                    path_hint=path_hint,
+                    k=k,
+                )
+                if structured_chunks:
+                    return _source_result(
+                        "ok",
+                        structured_chunks,
+                        citations=[c["citation"] for c in structured_chunks],
+                        endpoint="/fnlttSinglAcnt.json",
+                    )
         bgn_de, end_de = self._window(query, base_year, rcept_from=None, rcept_to=None, lookback_days=self.client.config.lookback_days)
         try:
             raw, limitations = self._search_disclosures(

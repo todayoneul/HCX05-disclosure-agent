@@ -1,6 +1,6 @@
 # 금융 공시 질의응답 에이전트 (Disclosure Agent)
 
-한국어 기업 공시를 분석하여 재무 수치, 공시 이벤트, 정정 내역, 기업 개요 및 사업 내용을 정확하게 답변하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다. 금융 분석가와 개발자가 신뢰할 수 있는 공시 질의응답을 제공하도록 설계되었습니다. 금융감독원 OpenDART 실시간 공개 API를 단일 데이터 원천(Live, Read-only)으로 활용하며, 사전 구축된 대용량 코퍼스나 SQLite/FTS 인덱스 파일 없이도 즉시 구동됩니다. 기업 고유번호 카탈로그(`corpCode.xml`), 공시 목록(`list.json`), 공시 원문 아카이브(`document.xml`)의 세 가지 엔드포인트를 사용하며, 기업 카탈로그는 첫 회사명 질의 시점에 지연 로딩(lazy-loading)되어 서버 기동을 지연시키지 않습니다.
+한국어 기업 공시를 분석하여 재무 수치, 공시 이벤트, 정정 내역, 기업 개요 및 사업 내용을 정확하게 답변하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다. 금융 분석가와 개발자가 신뢰할 수 있는 공시 질의응답을 제공하도록 설계되었습니다. 금융감독원 OpenDART 실시간 공개 API를 단일 데이터 원천(Live, Read-only)으로 활용하며, 사전 구축된 대용량 코퍼스나 SQLite/FTS 인덱스 파일 없이도 즉시 구동됩니다. 기업 고유번호 카탈로그(`corpCode.xml`), 공시 목록(`list.json`), 정형 재무제표(`fnlttSinglAcnt.json`, `fnlttMultiAcnt.json`), 공시 원문 아카이브(`document.xml`) 엔드포인트를 사용하며, 정기보고서 주요 재무 지표는 정형 API 조회를 우선 적용하고 필요한 경우 원문 아카이브로 안전하게 폴백합니다. 기업 카탈로그는 첫 회사명 질의 시점에 지연 로딩(lazy-loading)되어 서버 기동을 지연시키지 않습니다.
 
 ## 시스템 아키텍처
 
@@ -25,11 +25,13 @@ flowchart TB
     subgraph DataLayer[OpenDART 데이터 계층]
         CORP[corpCode.xml 기업 목록]
         LIST[list.json 공시 목록]
+        FIN[fnlttSinglAcnt.json / fnlttMultiAcnt.json 정형 재무제표]
         DOC[document.xml 원문 아카이브]
     end
 
     D_TOOLS --> CORP
     D_TOOLS --> LIST
+    D_TOOLS --> FIN
     D_TOOLS --> DOC
 
     PACK --> VERIFY{사후 검증: 수치·단위·인용}
@@ -43,7 +45,7 @@ flowchart TB
 1. **입력 및 범위 검증**: 질문 길이, 제어문자 유무, 공시 데이터베이스 범위를 검증합니다.
 2. **질의 분석 및 라우팅**: 단일 지표나 정형 질의는 결정적 도구 경로로 직행하고, 복합 질의는 HyperCLOVA X 플래너로 전달합니다.
 3. **기업 식별 및 공시 목록 탐색**: `corpCode.xml`로 기업 고유번호를 확인하고, `list.json`을 통해 해당 연도 및 보고서 접수번호를 확보합니다.
-4. **공시 원문 수집 및 구조화 파싱**: `document.xml`에서 압축 원문을 수집한 뒤, 표 구조와 섹션 목차 계층을 보존하여 파싱합니다.
+4. **정형 재무제표 조회 및 공시 원문 수집**: 주요 재무 수치는 `fnlttSinglAcnt.json` 및 `fnlttMultiAcnt.json` 정형 엔드포인트를 우선 조회하여 계정과목 수치를 직접 확보하며, 비정형 질의나 정형 미제공 항목은 `document.xml` 압축 원문을 수집하여 표 구조와 섹션 목차 계층을 보존하여 파싱합니다.
 5. **결정적 수치 계산 및 컨텍스트 패킹**: 재무비율이나 증감률은 Python `Decimal` 모듈로 정밀 연산하고, 12개 정규 필드를 갖춘 표준 인용 컨텍스트를 구성합니다.
 6. **사후 검증 및 안전 폐쇄(Fail-Closed)**: 답변에 포함된 핵심 수치, 단위, 인용 접수번호가 수집된 근거와 정확히 일치하는지 대조하며, 근거가 불충분하면 추측 대신 정보 한계 응답을 반환합니다.
 7. **표준 응답 반환**: 검증을 통과한 답변을 5개 필수 필드로 직렬화하여 `GET /answer`로 전달합니다.
@@ -143,7 +145,7 @@ src/disclosure_agent/
 ├── retrieval/      # 유계 어휘 검색 인터페이스
 ├── runtime/        # 실행 예산(8회 도구, 6회 모델, 270초 데드라인) 및 재시도 게이트웨이
 ├── server/         # FastAPI 기반 /healthz 및 /answer 서빙
-├── sources/        # OpenDART API 연동 계층 (corpCode, list, document)
+├── sources/        # OpenDART API 연동 계층 (기업·공시·정형 재무·원문)
 └── tools/          # 기업 식별, 공시 조회, Python Decimal 계산 도구
 
 pipeline/           # 데이터 파이프라인 구성 요소

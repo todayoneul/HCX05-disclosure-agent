@@ -36,9 +36,9 @@
 4. **콜드 기업 카탈로그 및 준비도 지연 (Cold Corp Catalog & Readiness)**:
    - 근거: `src/disclosure_agent/sources/opendart.py:473, 482`, `src/disclosure_agent/server/production.py`.
    - 현상: 고유번호 전체 XML(`corpCode.xml`)이 첫 회사명 질의 시점에 지연 로딩되어 첫 사용자 요청의 레이턴시가 급증하며, `GET /healthz`는 OpenDART 통신 가능 여부나 카탈로그 준비 상태를 검증하지 않습니다.
-5. **3개 엔드포인트 의존 구조 (Limited Endpoints)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:173`.
-   - 현상: `corpCode.xml`, `list.json`, `document.xml` 3개만 연동되어 있어, OpenDART가 공식 지원하는 단일/다송 재무제표(`fnlttSinglAcnt.json`, `fnlttMultiAcnt.json`), 배당, 임원보수, 주요사항보고서 등 정형 API를 활용하지 못하고 비정형 본문 텍스트에 과도하게 의존합니다.
+5. **정형 이벤트 엔드포인트 공백 (Structured Event Endpoint Gap)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 P1-A 정형 재무 조회 경로 및 `query_events` 구현.
+   - 현상: P1-A에서 단일·다중회사 주요계정 API(`fnlttSinglAcnt.json`, `fnlttMultiAcnt.json`) 연동은 완료했습니다. 배당, 임원보수, 주요사항보고서 등 나머지 정형 API는 아직 연동하지 않아 해당 영역은 공시 목록과 원문 검색에 의존합니다.
 6. **불완전한 정정·최신·철회 계보 처리 (Incomplete Correction & Withdrawal Handling)**:
    - 근거: `src/disclosure_agent/sources/opendart.py:596, 1129`.
    - 현상: `list.json` 메타데이터만으로는 이전 원본 공시의 접수번호를 식별하지 못해 `root_rcept_no`를 현재 접수번호로 귀속시키고 `get_history`를 정보 한계로 반환하며, 철회·취소 공시를 정정 계보와 명확히 분기하지 못합니다.
@@ -125,10 +125,40 @@
 
 ---
 
-## 4. P1 개선 과제 백로그 (P1 Backlog: 탄력성 및 검색 품질)
+## 4. P1 개선 과제 현황 및 검증 증빙 매트릭스
 
-1. **정형 OpenDART API 연동 (Structured Financial & Major Events APIs)**:
-   - `/api/fnlttSinglAcnt.json` 및 `/api/fnlttMultiAcnt.json`을 연동하여 재무상태표·손익계산서 주요 계정과목(매출액, 영업이익, 당기순이익, 자산총계 등)을 텍스트 파싱 없이 정형 수치 및 단위로 직접 조회.
+| 과제 ID | 과제명 | 상태 | 대상 모듈 | 검증 기준 및 증빙 (Verification Evidence) |
+|---|---|---|---|---|
+| **P1-A** | 정형 OpenDART 단일/다중 재무제표 API 연동 및 정형 우선 검색 | `COMPLETED` | `src/disclosure_agent/sources/opendart.py` | `fnlttSinglAcnt.json` 및 `fnlttMultiAcnt.json` 엄격한 파라미터 검증, 정기 재무 질의 시 원문 ZIP 다운로드 배제, CFS/OFS 및 분기 누적 수치 보존, 정당한 013/014 폴백 및 일시 장애 전파 검증 |
+| **P1-B** | 비고(`rm`) 필드 시맨틱 분석을 통한 정정·철회 계보 추적 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | `list.json` 비고 컬럼 분석 및 양방향 정정/철회 계보 추적 |
+| **P1-C** | 기업 카탈로그 로컬 영속화 및 준비도 웜업 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | `corpCode.xml` 로컬 영속화 및 웜업 검증 |
+| **P1-D** | 섹션 계층 인지 하이브리드 검색 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | 힌트와 렉시컬 결합 및 2,400자 최적화 서브 청킹 |
+| **P1-E** | 캐시 신선도 TTL 및 공시 워터마크 | `PENDING` | `src/disclosure_agent/runtime/cache.py` | 시간 기반 TTL 및 최종 공시 워터마크 |
+| **P1-F** | 단일 재시도 소유권 및 협력적 취소 전파 | `PENDING` | `src/disclosure_agent/runtime/retry.py` | 게이트웨이 단일 재시도 및 타임아웃 취소 전파 |
+
+### P1-A: 정형 OpenDART 단일/다중 재무제표 API 연동 및 정형 우선 검색
+- **배경 및 문제점**:
+  - 기존 OpenDART 데이터 소스는 단순 재무제표 수치(매출액, 영업이익, 당기순이익, 자산총계 등)를 조회할 때도 용량이 큰 `document.xml` 원문 압축 파일을 매번 다운로드하여 비정형 마크다운/HTML을 파싱해야 하므로 불필요한 네트워크 대역폭과 지연시간이 발생했습니다.
+- **개선 방안 및 완료 내역**:
+  - **클라이언트 API 연동**: `OpenDartClient`에 단일회사 주요계정(`single_financial_accounts`, `/fnlttSinglAcnt.json`) 및 다중회사 주요계정(`multi_financial_accounts`, `/fnlttMultiAcnt.json`) 메서드를 구현하고, 8자리 기업코드, 4자리 사업연도(2015년 이후), 4종 정규 보고서코드(11013/11012/11014/11011), 다중회사 최대 100개 상한 검증을 적용했습니다. API 인증키(`crtfc_key`)는 오직 전송 경계에서만 주입되며 예외 메시지나 로깅에 일체 노출되지 않습니다.
+  - **정형 우선 검색 (Structured-First Retrieval)**: `search_chunks`에 정형 우선 경로를 구축하여, 기업 고유번호, 사업연도, 정기 보고서코드가 주어지고 재무 지표를 묻는 질의에 대해 원문 ZIP 파일 다운로드 없이 정형 API 응답으로부터 연결(CFS) 대 별도(OFS), 재무상태표(BS) 대 손익계산서(IS), 당기/전기/전전기 수치, 분기/반기 3개월 및 누적 수치, 통화 단위 및 14자리 공시 접수번호를 온전히 보존하는 결정적 근거 표를 자동 생성하도록 구현했습니다.
+  - **안전한 폴백 및 장애 전파**: 비재무 질의나 정형 no-data(013/014) 또는 미일치 시 기존의 유계 원문 압축파일 검색으로 안전하게 폴백하며, API 전송·인증·쿼터·형식 오류 발생 시에는 폴백하지 않고 타입화된 오류를 즉시 전파하여 응답 캐시 오염을 원천 차단했습니다.
+- **검증 증빙**:
+  - `tests/unit/test_opendart_source.py::test_client_single_financial_accounts_input_validation` 통과
+  - `tests/unit/test_opendart_source.py::test_client_multi_financial_accounts_input_validation` 통과
+  - `tests/unit/test_opendart_source.py::test_client_single_and_multi_financial_accounts_success` 통과
+  - `tests/unit/test_opendart_source.py::test_client_financial_accounts_no_data_and_typed_error_propagation` 통과
+  - `tests/unit/test_opendart_source.py::test_source_single_and_multi_financial_accounts` 통과
+  - `tests/unit/test_opendart_source.py::test_search_chunks_prefers_structured_financial_accounts_without_document_download` 통과 (원문 ZIP 다운로드 0회 검증)
+  - `tests/unit/test_opendart_source.py::test_search_chunks_structured_preserves_quarterly_cumulative_fields` 통과 (3개월/누적 필드 보존 검증)
+  - `tests/unit/test_opendart_source.py::test_search_chunks_falls_back_to_document_on_structured_no_data` 통과
+  - `tests/unit/test_opendart_source.py::test_search_chunks_propagates_structured_backend_error_without_fallback` 통과
+  - `tests/integration/test_opendart_cache_composition.py::test_structured_financial_search_answers_common_metrics_without_document_download` 통과 (AgentRunner 및 5-field AnswerResponse 통합 검증)
+  - `tests/integration/test_opendart_cache_composition.py::test_structured_financial_backend_error_prevents_cache_and_retries` 통과
+
+## 4.1. 후속 P1 개선 과제 백로그 (P1 Backlog: 탄력성 및 검색 품질)
+
+1. **주요사항보고서 정형 API 연동 (Structured Major Events APIs)**:
    - 주요사항보고서 정형 엔드포인트 연동을 통해 유상증자, 합병, 감자 등의 정형 이벤트 수치 및 일자 확보.
 2. **비고(`rm`) 필드 시맨틱 분석을 통한 정정·철회 계보 추적 (Correction `rm` Semantics)**:
    - `list.json` 응답의 비고(`rm`) 컬럼(유, 정, 철 등) 및 공시 보고서명 정규표현식을 파싱하여 정정 전 원본 공시와 최종 정정본 간의 양방향 연결 계보 구축.
