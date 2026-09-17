@@ -22,38 +22,38 @@
 
 ---
 
-## 2. 확인된 현재 한계 및 저장소 기반 근거 (Confirmed Limitations & Evidence)
+## 2. 확인된 한계 및 해결 현황 (Confirmed Limitations & Resolution Status)
 
-1. **원문 표(Table) 및 섹션 경로 평탄화 (Table & Section Flattening)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:868` (`_visible_text`), `src/disclosure_agent/sources/opendart.py:902` (`_split_sections`).
-   - 현상: HTML 태그를 단순 줄바꿈으로 치환하여 재무제표와 주요 현황 표의 행·열 관계가 평탄화되며, 단순 정규식 분할로 인해 하위 목차 계층(`1-1.`, `2.` 등)이 유실됩니다. 반면 `src/disclosure_agent/parsing/periodic.py`에는 마크다운 표 보존 및 계층 경로 파서가 이미 존재합니다.
-2. **검색 팬아웃 및 인메모리 캐시 스래싱 (Search Fanout & Cache Thrashing)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:59` (`_MAX_DOCUMENT_CACHE = 8`), `src/disclosure_agent/sources/opendart.py:1075` (`search_chunks`).
-   - 현상: `search_chunks`가 필터링된 모든 후보 문서에 대해 무제한 원문 다운로드를 시도하며, 고정 크기 8의 LRU 캐시 범위를 초과하면 랭킹 루프 중 선행 문서가 축출되어 재다운로드 스래싱이 발생합니다.
-3. **전송·인증·쿼터·형식 장애의 시맨틱 축퇴 (Error Semantic Collapse)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:494` (`_failure`), `src/disclosure_agent/tool_registry.py:700, 776`, `src/disclosure_agent/runtime/service.py:107`.
-   - 현상: 일시적 네트워크 단절(`OpenDartTransportError`), 일일 쿼터 초과(`OpenDartQuotaError`), API 상태 오류가 하위 레벨에서 단순 `error` 또는 `not_found`로 완화되어, 최종 응답 빌더가 "정보 없음" 정상 답변을 생성하고 `BoundedResponseCache`에 영구 오염 저장됩니다.
-4. **콜드 기업 카탈로그 및 준비도 지연 (Cold Corp Catalog & Readiness)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:473, 482`, `src/disclosure_agent/server/production.py`.
-   - 현상: 고유번호 전체 XML(`corpCode.xml`)이 첫 회사명 질의 시점에 지연 로딩되어 첫 사용자 요청의 레이턴시가 급증하며, `GET /healthz`는 OpenDART 통신 가능 여부나 카탈로그 준비 상태를 검증하지 않습니다.
-5. **정형 이벤트 엔드포인트 공백 (Structured Event Endpoint Gap)**:
+1. **해결됨: 원문 표(Table) 및 섹션 경로 평탄화 (P0-A)**:
+   - 근거: `src/disclosure_agent/parsing/periodic.py`의 `parse_periodic_source`와 `src/disclosure_agent/sources/opendart.py`의 원문 문서 구성 경로.
+   - 현황: HTML/XML 표를 마크다운 행·열 구조로 보존하고 하위 목차를 계층 경로로 유지합니다. 첨부문서와 중복 섹션도 결정적으로 구분합니다.
+2. **해결됨: 검색 팬아웃 및 인메모리 캐시 스래싱 (P0-B)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 `_MAX_SEARCH_NEW_DOCUMENTS`와 `search_chunks` 요청 로컬 문서 고정.
+   - 현황: 검색당 신규 원문 다운로드를 최대 5개로 제한하고, 동일 요청에서 이미 읽은 접수번호를 재다운로드하지 않습니다.
+3. **해결됨: 전송·인증·쿼터·형식 장애의 시맨틱 축퇴 (P0-C)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 타입화된 OpenDART 오류, `src/disclosure_agent/tool_registry.py`, `src/disclosure_agent/runtime/service.py`.
+   - 현황: 일시 장애를 정상 데이터 부재와 분리해 최종 응답 구성 전에 전파하며, 장애 응답이 `BoundedResponseCache`에 저장되지 않도록 차단했습니다.
+4. **해결됨: 콜드 기업 카탈로그 및 준비도 지연 (P1-C)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 `_read_catalog_cache`, `_write_catalog_cache`, `warmup`, `catalog_ready`와 `src/disclosure_agent/server/app.py`의 lifespan 웜업.
+   - 현황: 검증된 기업 카탈로그를 로컬에 영속화해 재사용하고, 애플리케이션은 카탈로그 웜업과 준비도 확인을 마친 뒤에만 ready 상태를 공개합니다.
+5. **잔여 과제: 정형 이벤트 엔드포인트 공백 (Structured Event Endpoint Gap)**:
    - 근거: `src/disclosure_agent/sources/opendart.py`의 P1-A 정형 재무 조회 경로 및 `query_events` 구현.
    - 현상: P1-A에서 단일·다중회사 주요계정 API(`fnlttSinglAcnt.json`, `fnlttMultiAcnt.json`) 연동은 완료했습니다. 배당, 임원보수, 주요사항보고서 등 나머지 정형 API는 아직 연동하지 않아 해당 영역은 공시 목록과 원문 검색에 의존합니다.
-6. **불완전한 정정·최신·철회 계보 처리 (Incomplete Correction & Withdrawal Handling)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:596, 1129`.
-   - 현상: `list.json` 메타데이터만으로는 이전 원본 공시의 접수번호를 식별하지 못해 `root_rcept_no`를 현재 접수번호로 귀속시키고 `get_history`를 정보 한계로 반환하며, 철회·취소 공시를 정정 계보와 명확히 분기하지 못합니다.
-7. **단순 출현 빈도 랭킹 및 8k 대 2.4k 컨텍스트 불일치 (Ranking & Context Mismatch)**:
-   - 근거: `src/disclosure_agent/sources/opendart.py:58` (`_MAX_CHUNK_CHARS = 8_000`), `src/disclosure_agent/context/packer.py:27` (`max_passage_chars = 2400`).
-   - 현상: `search_chunks`는 최대 8,000자 단위 청크에서 단순 토큰 출현 횟수로 점수를 매기지만, `ContextPacker`는 패시지당 최대 2,400자로 절단하므로 상위 랭킹된 거대 청크가 패킹 과정에서 잘려나가 핵심 정보가 소실됩니다.
-8. **HCX 재시도 소유권 중복 (Duplicate HCX Retry Ownership)**:
-   - 근거: `src/disclosure_agent/runtime/retry.py:33` (`BoundedRetryGateway`), `src/disclosure_agent/agent/runner.py:7986` (`_complete_with_retry`).
-   - 현상: 게이트웨이 레이어와 러너 내부 양쪽에서 각각 독립적으로 1회 재시도를 구현하여, 일시 오류 발생 시 중복 재시도로 인한 시간 예산 초과 위험이 존재합니다.
-9. **정적 런타임 식별자 및 캐시 신선도 부재 (Static Identity & No Freshness)**:
-   - 근거: `src/disclosure_agent/server/production.py:221`, `src/disclosure_agent/runtime/cache.py`.
-   - 현상: `runtime_identity`가 정적 문자열(`opendart-runtime`)로 고정되어 있고 캐시에 TTL이나 최신 공시 워터마크가 없어, 장기 서빙 중 신규 공시나 정정 공시가 제출되어도 기존 캐시 응답이 지속 반환됩니다.
-10. **Shielded 비동기 타임아웃의 백그라운드 리소스 누수 (Shielded Timeout Leak)**:
-    - 근거: `src/disclosure_agent/server/app.py:159`.
-    - 현상: `asyncio.wait_for(asyncio.shield(future), timeout=...)` 구조로 인해 클라이언트 타임아웃이 발생해도 백그라운드 워커 스레드의 작업이 취소되지 않고 지속 실행되어 단일 워커 리소스를 점유합니다.
+6. **해결됨: 정정·최신·철회 계보 처리 (P1-B)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 `_rm_flags`, `_report_chain_key`, `_apply_correction_lineage`, `get_history`.
+   - 현황: `list.json`의 `rm` 정정·철회 신호와 보고서 식별자를 결합해 검증 가능한 원본-정정본 양방향 계보를 만들고, 철회 또는 대체된 공시는 최신 유효본에서 제외합니다. 조회 범위 밖 원본처럼 유일하게 연결할 수 없는 경우는 계속 정보 한계로 처리합니다.
+7. **해결됨: 단순 출현 빈도 랭킹 및 8k 대 2.4k 컨텍스트 불일치 (P1-D)**:
+   - 근거: `src/disclosure_agent/sources/opendart.py`의 `_search_subchunks`와 섹션 경로·본문·힌트 결합 랭킹.
+   - 현황: 문서 본문과 계층 섹션 경로를 함께 평가하고, 검색 결과를 `ContextPacker` 규격에 맞는 최대 2,400자 서브 청크로 반환합니다.
+8. **해결됨: HCX 재시도 소유권 중복 (P1-F)**:
+   - 근거: `src/disclosure_agent/runtime/retry.py`의 `BoundedRetryGateway`와 `src/disclosure_agent/agent/runner.py`의 단일 시도 `_complete_model`.
+   - 현황: 재시도 정책은 런타임 게이트웨이만 소유하며 러너는 호출을 재생하지 않습니다. 전체 전송 시도는 최초 1회와 조건부 재시도 1회로 제한됩니다.
+9. **해결됨: 캐시 신선도 부재 (P1-E)**:
+   - 근거: `src/disclosure_agent/runtime/cache.py`의 `ttl_seconds`, `watermark_provider`와 `OpenDartSource.cache_watermark`.
+   - 현황: 응답 캐시는 기본 300초 TTL로 만료되고, 프로세스가 더 최신 공시 접수번호를 관측하면 기존 항목을 즉시 무효화합니다.
+10. **해결됨: 비동기 타임아웃의 백그라운드 리소스 누수 (P1-F)**:
+    - 근거: `src/disclosure_agent/server/app.py`의 `cancel_event`/`future.cancel()`과 `src/disclosure_agent/execution.py`의 요청 로컬 실행 컨텍스트.
+    - 현황: 서버 타임아웃이 러너와 OpenDART HTTP 요청까지 잔여 시간 및 취소 신호로 전파되어 후속 도구·모델 호출을 중단합니다.
 11. **13,000행 초거대 러너 모놀리스 (Runner Monolith)**:
     - 근거: `src/disclosure_agent/agent/runner.py` (13,251 라인).
     - 현상: 질의 분류, 휴리스틱 라우팅, 프롬프트 조립, HCX 호출, 복구 루프, 사후 검증이 하나의 파일에 강결합되어 있어 모듈별 독립 검증과 유지보수를 어렵게 만듭니다.
@@ -130,11 +130,11 @@
 | 과제 ID | 과제명 | 상태 | 대상 모듈 | 검증 기준 및 증빙 (Verification Evidence) |
 |---|---|---|---|---|
 | **P1-A** | 정형 OpenDART 단일/다중 재무제표 API 연동 및 정형 우선 검색 | `COMPLETED` | `src/disclosure_agent/sources/opendart.py` | `fnlttSinglAcnt.json` 및 `fnlttMultiAcnt.json` 엄격한 파라미터 검증, 정기 재무 질의 시 원문 ZIP 다운로드 배제, CFS/OFS 및 분기 누적 수치 보존, 정당한 013/014 폴백 및 일시 장애 전파 검증 |
-| **P1-B** | 비고(`rm`) 필드 시맨틱 분석을 통한 정정·철회 계보 추적 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | `list.json` 비고 컬럼 분석 및 양방향 정정/철회 계보 추적 |
-| **P1-C** | 기업 카탈로그 로컬 영속화 및 준비도 웜업 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | `corpCode.xml` 로컬 영속화 및 웜업 검증 |
-| **P1-D** | 섹션 계층 인지 하이브리드 검색 | `PENDING` | `src/disclosure_agent/sources/opendart.py` | 힌트와 렉시컬 결합 및 2,400자 최적화 서브 청킹 |
-| **P1-E** | 캐시 신선도 TTL 및 공시 워터마크 | `PENDING` | `src/disclosure_agent/runtime/cache.py` | 시간 기반 TTL 및 최종 공시 워터마크 |
-| **P1-F** | 단일 재시도 소유권 및 협력적 취소 전파 | `PENDING` | `src/disclosure_agent/runtime/retry.py` | 게이트웨이 단일 재시도 및 타임아웃 취소 전파 |
+| **P1-B** | 비고(`rm`) 필드 시맨틱 분석을 통한 정정·철회 계보 추적 | `COMPLETED` | `src/disclosure_agent/sources/opendart.py` | `rm` 정정 신호 기반 원본-정정본 양방향 이력, 철회 공시 비최신 처리, 내부 계보 필드 비노출 검증 |
+| **P1-C** | 기업 카탈로그 로컬 영속화 및 준비도 웜업 | `COMPLETED` | `src/disclosure_agent/sources/opendart.py`<br>`src/disclosure_agent/server/app.py` | `corpCode.xml` 검증 캐시 재사용, 영숫자 종목코드 보존, 불량 행 격리, ready 이전 웜업 검증 |
+| **P1-D** | 섹션 계층 인지 하이브리드 검색 | `COMPLETED` | `src/disclosure_agent/sources/opendart.py` | 본문·섹션 경로·힌트 결합 랭킹 및 최대 2,400자 서브 청킹 검증 |
+| **P1-E** | 캐시 신선도 TTL 및 공시 워터마크 | `COMPLETED` | `src/disclosure_agent/runtime/cache.py`<br>`src/disclosure_agent/runtime/service.py` | 기본 300초 TTL과 최신 관측 공시 워터마크 변경 시 캐시 무효화 검증 |
+| **P1-F** | 단일 재시도 소유권 및 협력적 취소 전파 | `COMPLETED` | `src/disclosure_agent/runtime/retry.py`<br>`src/disclosure_agent/execution.py`<br>`src/disclosure_agent/server/app.py` | 게이트웨이 단일 재시도 소유권, 서버 타임아웃 취소 신호 및 잔여 시간 전파 검증 |
 
 ### P1-A: 정형 OpenDART 단일/다중 재무제표 API 연동 및 정형 우선 검색
 - **배경 및 문제점**:
@@ -156,24 +156,51 @@
   - `tests/integration/test_opendart_cache_composition.py::test_structured_financial_search_answers_common_metrics_without_document_download` 통과 (AgentRunner 및 5-field AnswerResponse 통합 검증)
   - `tests/integration/test_opendart_cache_composition.py::test_structured_financial_backend_error_prevents_cache_and_retries` 통과
 
-## 4.1. 후속 P1 개선 과제 백로그 (P1 Backlog: 탄력성 및 검색 품질)
+## 4.1. P1-B~P1-F 완료 내역
+
+### P1-B: `rm` 기반 정정·철회 계보
+
+- `list.json`의 `rm` 값을 정정(`정`)과 철회(`철`) 신호로 정규화하고, 회사·보고서 유형·기준기간을 결합한 키로 동일 계보 후보를 제한합니다.
+- 검증 가능한 선행 원본과 정정본에 `root_rcept_no`, `latest_rcept_no`, `correction_status=linked`를 부여합니다. 철회 또는 대체된 공시는 `is_latest=False`로 처리합니다.
+- `get_history`는 확인된 계보만 양방향으로 반환하며, 동일 제목이라는 이유만으로 임의 연결하지 않습니다. `rm`, `rm_flags` 같은 내부 계산 필드는 공개 도구 응답에 노출하지 않습니다.
+- 검증 증빙: `test_rm_correction_signal_builds_a_verified_bidirectional_chain`, `test_rm_withdrawal_is_not_exposed_as_a_latest_effective_filing`, `test_equal_report_titles_do_not_create_an_unverified_history_chain`.
+
+### P1-C: 기업 카탈로그 영속화와 준비도
+
+- `corpCode.xml` 파싱 결과를 버전·다이제스트가 포함된 로컬 JSON 캐시로 원자적으로 저장하고, 유효기간 안의 검증된 캐시는 네트워크 재호출 없이 재사용합니다.
+- 한 개의 불량 행이 전체 카탈로그를 폐기하지 않도록 행 단위로 격리하며, OpenDART가 제공하는 영숫자 종목코드도 보존합니다.
+- 프로덕션 서비스 구성 자체는 네트워크를 호출하지 않지만 FastAPI lifespan은 `warmup()`과 `catalog_ready` 확인을 마친 뒤 ready 상태를 공개합니다.
+- 검증 증빙: `test_company_catalog_warmup_persists_and_reuses_valid_cache`, `test_company_catalog_keeps_alphanumeric_stock_codes_and_skips_bad_rows`, `test_startup_warms_a_service_before_marking_it_ready`.
+
+### P1-D: 섹션 인지 하이브리드 검색
+
+- 검색 점수에 본문 토큰, 계층 섹션 경로 토큰, `path_hint` 일치, 구문 일치 보너스를 함께 반영합니다.
+- 최대 8,000자 원문 섹션을 검색 전에 2,400자 이하 서브 청크로 나누어 `ContextPacker` 절단으로 핵심 문장이 사라지는 문제를 줄였습니다.
+- 검증 증빙: `test_search_chunks_can_match_a_section_path_when_body_omits_heading_terms`, `test_search_chunks_returns_context_packer_sized_subchunks`.
+
+### P1-E: 캐시 TTL과 공시 워터마크
+
+- `BoundedResponseCache` 항목에 저장 시각과 공시 워터마크를 함께 기록합니다. 기본 TTL 300초가 지나거나 현재 워터마크가 달라지면 캐시를 반환하지 않습니다.
+- `OpenDartSource`는 프로세스가 관측한 가장 최신 `(rcept_dt, rcept_no)`를 워터마크로 제공하고, `ReliableAnswerService`가 이를 캐시에 연결합니다.
+- 검증 증빙: `test_cache_expires_by_ttl_and_disclosure_watermark` 및 런타임 캐시 회귀 테스트.
+
+### P1-F: 단일 재시도 소유권과 협력적 취소
+
+- HCX 재시도는 `BoundedRetryGateway`만 수행합니다. `AgentRunner._complete_model`은 단일 호출만 위임하여 중첩 재시도를 제거했습니다.
+- 서버 요청마다 deadline과 `cancel_event`를 요청 로컬 실행 컨텍스트에 바인딩합니다. 타임아웃 시 이벤트를 설정하고 future를 취소하며, 러너와 OpenDART 전송 계층은 잔여 시간이 없거나 취소된 경우 새 작업을 시작하지 않습니다.
+- 검증 증빙: `test_runner_delegates_retry_ownership_without_local_replay`, `test_retryable_early_failure_gets_at_most_one_retry`, `test_timeout_signals_cooperative_cancellation_to_the_worker`.
+
+### P1 통합 검증 결과
+
+- 오프라인 전체 회귀: `2073 passed, 5 skipped`.
+- 실제 HCX-005 최소 호출: HTTP 200, 정상 종료(`stop`) 및 지시된 단문 응답 확인.
+- 실제 OpenDART 기반 서버: `/healthz` ready 확인, 삼성전자 2024년 연결 매출액의 전년 대비 증가율 `16.20%`와 2023·2024 사업보고서 인용 확인.
+- 실제 원문 검색: 삼성전자 2024년 사업의 개요 질의에서 DX·DS·SDC·Harman 내용과 세부 섹션 인용 확인.
+
+## 4.2. 후속 확장 과제
 
 1. **주요사항보고서 정형 API 연동 (Structured Major Events APIs)**:
-   - 주요사항보고서 정형 엔드포인트 연동을 통해 유상증자, 합병, 감자 등의 정형 이벤트 수치 및 일자 확보.
-2. **비고(`rm`) 필드 시맨틱 분석을 통한 정정·철회 계보 추적 (Correction `rm` Semantics)**:
-   - `list.json` 응답의 비고(`rm`) 컬럼(유, 정, 철 등) 및 공시 보고서명 정규표현식을 파싱하여 정정 전 원본 공시와 최종 정정본 간의 양방향 연결 계보 구축.
-   - 철회공시 발생 시 이전 공시의 효력 상실 여부를 명시하는 플래그 부여.
-3. **기업 카탈로그 로컬 영속화 및 준비도 웜업 (Catalog Persistence & Readiness)**:
-   - `corpCode.xml`의 파싱 결과를 로컬 파일(SQLite 또는 경량 바이너리 캐시)로 영속화하여 매 기동 시 반복 다운로드 방지.
-   - `GET /healthz` 실행 시 카탈로그 유효성 및 메모리 로드 상태를 능동 검증.
-4. **섹션 계층 인지 하이브리드 검색 (Hybrid Section-Aware Retrieval)**:
-   - 재무제표 주석, 사업의 내용, 이사의 경영진단 등 핵심 섹션 경로 힌트와 렉시컬 토큰 매칭의 결합.
-   - `ContextPacker`의 2,400자 패시지 규격에 최적화된 서브 청킹 및 불용어 정제.
-5. **캐시 신선도 TTL 및 공시 워터마크 (Freshness TTL & Watermark)**:
-   - `BoundedResponseCache`에 시간 기반 만료(TTL) 또는 당일 최종 공시 접수 시각 기반 워터마크를 도입하여 데이터 신선도 보장.
-6. **단일 재시도 소유권 및 협력적 취소 전파 (Single Retry Owner & Cooperative Cancellation)**:
-   - HCX 재시도 로직을 `BoundedRetryGateway`로 단일화하고 러너 내부의 중복 재시도 제거.
-   - `src/disclosure_agent/server/app.py`의 `asyncio.shield`를 정리하고 `ReliableAnswerService`의 잔여 시간 예산을 HTTP 클라이언트 타임아웃에 협력적으로 전파하여 불필요한 백그라운드 연산 차단.
+   - 주요사항보고서 전용 엔드포인트를 연동하여 유상증자, 합병, 감자 등의 정형 이벤트 수치 및 일자를 확보합니다.
 
 ---
 
@@ -228,7 +255,7 @@
 
 ### 단계별 구현 순서 (Phase Sequencing)
 1. **Phase 1 (P0 집중 완료)**: P0-A(표 마크다운/섹션 보존) $\rightarrow$ P0-B(다운로드 상한 5개 및 요청 로컬 핀닝) $\rightarrow$ P0-C(일시 장애 전파 및 캐시 오염 차단).
-2. **Phase 2 (P1 아키텍처 고도화)**: 정형 재무 엔드포인트 연동 $\rightarrow$ 비고(`rm`) 정정 계보 분석 $\rightarrow$ 카탈로그 영속화 $\rightarrow$ 단일 재시도 및 취소 연동.
+2. **Phase 2 (P1 아키텍처 고도화, 완료)**: 정형 재무 엔드포인트 연동 $\rightarrow$ 비고(`rm`) 정정 계보 분석 $\rightarrow$ 카탈로그 영속화 $\rightarrow$ 섹션 인지 검색 $\rightarrow$ TTL·워터마크 $\rightarrow$ 단일 재시도 및 취소 연동.
 3. **Phase 3 (P2 운영 안정성)**: 러너 모놀리스 분해 $\rightarrow$ 오프라인 모의 픽스처 E2E 스위트 $\rightarrow$ 관측성 계측기 구축.
 
 ### 작업 완료 전 필수 오프라인 5단계 검증 게이트

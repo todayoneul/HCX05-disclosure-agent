@@ -24,6 +24,7 @@ class RuntimeConfig:
     max_retry_delay_seconds: float = 5.0
     minimum_attempt_seconds: float = 0.1
     cache_entries: int = 128
+    cache_ttl_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         for label, value, maximum in (
@@ -31,6 +32,7 @@ class RuntimeConfig:
             ("retry_window_seconds", self.retry_window_seconds, 30.0),
             ("max_retry_delay_seconds", self.max_retry_delay_seconds, 5.0),
             ("minimum_attempt_seconds", self.minimum_attempt_seconds, 5.0),
+            ("cache_ttl_seconds", self.cache_ttl_seconds, 86_400.0),
         ):
             if (
                 type(value) not in {int, float}

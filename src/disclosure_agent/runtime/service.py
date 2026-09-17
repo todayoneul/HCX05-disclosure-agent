@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Callable, Protocol
 
 from disclosure_agent.agent import (
@@ -14,6 +15,11 @@ from disclosure_agent.agent import (
 from disclosure_agent.agent.contracts import validate_question
 
 from .cache import BoundedResponseCache
+from disclosure_agent.execution import (
+    current_request_deadline,
+    request_cancelled,
+    request_execution,
+)
 from .contracts import RuntimeConfig, RuntimeDeadlineError, RuntimeIdentity
 
 
@@ -55,6 +61,7 @@ class ReliableAnswerService:
         config: RuntimeConfig = RuntimeConfig(),
         cache: BoundedResponseCache | None = None,
         clock: Callable[[], float] = time.monotonic,
+        watermark_provider: Callable[[], str] | None = None,
     ) -> None:
         if not callable(getattr(runner, "run", None)):
             raise ValueError("runner must implement run")
@@ -75,13 +82,20 @@ class ReliableAnswerService:
         self._cache = (
             cache
             if cache is not None
-            else BoundedResponseCache(max_entries=config.cache_entries)
+            else BoundedResponseCache(
+                max_entries=config.cache_entries,
+                ttl_seconds=config.cache_ttl_seconds,
+                watermark_provider=watermark_provider,
+            )
         )
         self._clock = clock
 
     def answer(self, question_id: str, question: str) -> AnswerResponse:
         started = self._clock()
         deadline = started + self._config.hard_deadline_seconds
+        external_deadline = current_request_deadline()
+        if external_deadline is not None:
+            deadline = min(deadline, external_deadline)
         question_id, question = validate_question(
             question_id,
             question,
@@ -94,7 +108,7 @@ class ReliableAnswerService:
             run = self._runner.run(question_id, question)
         except Exception:
             raise RuntimeTemporaryError("model_gateway_failed") from None
-        if self._clock() >= deadline:
+        if self._clock() >= deadline or request_cancelled():
             raise RuntimeDeadlineError("runtime hard deadline was exhausted")
         if not isinstance(run, AgentRunResult):
             raise RuntimeContractError("runner result contract differs")
@@ -120,7 +134,7 @@ class ReliableAnswerService:
             response = self._builder.build(question, run)
         except Exception:
             raise RuntimeContractError("answer builder failed closed") from None
-        if self._clock() >= deadline:
+        if self._clock() >= deadline or request_cancelled():
             raise RuntimeDeadlineError("runtime hard deadline was exhausted")
         if (
             not isinstance(response, AnswerResponse)
@@ -130,6 +144,17 @@ class ReliableAnswerService:
             raise RuntimeContractError("answer response identity differs")
         self._cache.put(response, identity=self._identity)
         return response
+
+    def answer_with_context(
+        self,
+        question_id: str,
+        question: str,
+        *,
+        deadline: float,
+        cancel_event: threading.Event,
+    ) -> AnswerResponse:
+        with request_execution(deadline=deadline, cancel_event=cancel_event):
+            return self.answer(question_id, question)
 
 
 __all__ = [

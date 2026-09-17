@@ -240,3 +240,25 @@ def test_cache_is_bounded_and_evicts_the_least_recently_used_entry() -> None:
     assert cache.get("Q-2", "둘 질문", identity=IDENTITY) is None
     assert cache.get("Q-1", "첫 질문", identity=IDENTITY) is one
     assert cache.get("Q-3", "셋 질문", identity=IDENTITY) is three
+
+
+def test_cache_expires_by_ttl_and_disclosure_watermark() -> None:
+    clock = Clock()
+    watermark = {"value": "20260917000001"}
+    cache = BoundedResponseCache(
+        max_entries=2,
+        ttl_seconds=10.0,
+        clock=clock,
+        watermark_provider=lambda: watermark["value"],
+    )
+    cached = response("Q-1", "삼성전자 공시", "답변")
+    cache.put(cached, identity=IDENTITY)
+    assert cache.get("Q-1", "삼성전자 공시", identity=IDENTITY) is cached
+
+    watermark["value"] = "20260917000002"
+    assert cache.get("Q-1", "삼성전자 공시", identity=IDENTITY) is None
+
+    watermark["value"] = "20260917000003"
+    cache.put(cached, identity=IDENTITY)
+    clock.now += 10.0
+    assert cache.get("Q-1", "삼성전자 공시", identity=IDENTITY) is None

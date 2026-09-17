@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from disclosure_agent.agent.periods import report_base_month, requested_base_month
+from disclosure_agent.agent.periods import (
+    report_base_month,
+    report_base_year,
+    requested_base_month,
+)
 
 
 @pytest.mark.parametrize(
@@ -39,3 +43,18 @@ def test_report_base_month_accepts_only_periodic_base_months(
     report_name: str, expected: int | None
 ) -> None:
     assert report_base_month(report_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("report_name", "expected"),
+    [
+        ("사업보고서 (2023.12)", 2023),
+        ("반기보고서 (2024-06)", 2024),
+        ("분기보고서 (2024.10)", None),
+        ("분기보고서", None),
+    ],
+)
+def test_report_base_year_uses_only_valid_periodic_report_names(
+    report_name: str, expected: int | None
+) -> None:
+    assert report_base_year(report_name) == expected

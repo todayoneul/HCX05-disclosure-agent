@@ -12,9 +12,11 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import hashlib
 import io
 import json
 import re
+import tempfile
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -28,6 +30,10 @@ import requests
 from disclosure_agent.tools.common import result
 from disclosure_agent.tools.companies import CompanyResolver
 from disclosure_agent.parsing.periodic import parse_periodic_source
+from disclosure_agent.execution import (
+    request_cancelled,
+    request_remaining_seconds,
+)
 
 
 _API_ROOT = "https://opendart.fss.or.kr/api"
@@ -71,8 +77,18 @@ _DETAIL_BY_SUBTYPE = {
 }
 _SUBTYPE_BY_DETAIL = {value: key for key, value in _DETAIL_BY_SUBTYPE.items()}
 _MAX_CHUNK_CHARS = 8_000
+_SEARCH_CHUNK_CHARS = 2_400
 _MAX_DOCUMENT_CACHE = 8
 _MAX_SEARCH_NEW_DOCUMENTS = 5
+_CATALOG_CACHE_SCHEMA = 1
+_CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_CATALOG_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_RM_FLAG_ORDER = ("유", "코", "채", "넥", "공", "연", "정", "철")
+# Correction-lineage bookkeeping kept on the internal filing record but never
+# emitted in a tool result row, whose citation already carries the canonical
+# correction fields.  Leaking these inflated large list_sections payloads past
+# the bounded response size.
+_INTERNAL_FILING_KEYS = ("rm", "rm_flags")
 _STOP_TOKENS = frozenset(
     {
         "알려줘",
@@ -97,6 +113,165 @@ _STOP_TOKENS = frozenset(
         "를",
     }
 )
+
+
+def _catalog_rows(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 2_000_000:
+        return ()
+    rows: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        corp_code = str(item.get("corp_code") or "").strip()
+        corp_name = _compact(item.get("corp_name"))
+        stock_code = str(item.get("stock_code") or "").strip()
+        if (
+            not corp_code.isascii()
+            or not corp_code.isdigit()
+            or not 1 <= len(corp_code) <= 8
+            or not corp_name
+            or len(corp_name) > 200
+        ):
+            # Skip a single malformed identity row (missing corp_code or name)
+            # without discarding the entire 100k+ company catalog.
+            continue
+        # OpenDART assigns alphanumeric six-character stock codes to preferred
+        # shares and warrants (e.g. ``0068Y0``); keep those, drop anything that
+        # is not a bounded alphanumeric token.
+        if stock_code and (
+            not stock_code.isascii()
+            or not stock_code.isalnum()
+            or len(stock_code) > 6
+        ):
+            stock_code = ""
+        rows.append(
+            {
+                "corp_code": corp_code,
+                "corp_name": corp_name,
+                "listed_name": _compact(item.get("listed_name")) or corp_name,
+                "corp_eng_name": _compact(item.get("corp_eng_name")),
+                "stock_code": stock_code,
+                "sector": _compact(item.get("sector")),
+            }
+        )
+    return tuple(rows)
+
+
+def _catalog_digest(rows: tuple[dict[str, str], ...]) -> str:
+    encoded = json.dumps(
+        rows,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_catalog_cache(
+    path: Path, *, max_age_seconds: float
+) -> tuple[dict[str, str], ...]:
+    try:
+        if not path.is_file() or path.stat().st_size > _CATALOG_CACHE_MAX_BYTES:
+            return ()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping) or payload.get("schema") != _CATALOG_CACHE_SCHEMA:
+            return ()
+        fetched_at = payload.get("fetched_at")
+        if type(fetched_at) not in {int, float}:
+            return ()
+        age = time.time() - float(fetched_at)
+        if age < -300 or age > max_age_seconds:
+            return ()
+        rows = _catalog_rows(payload.get("rows"))
+        if not rows or payload.get("sha256") != _catalog_digest(rows):
+            return ()
+        return rows
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        return ()
+
+
+def _write_catalog_cache(path: Path, rows: tuple[dict[str, str], ...]) -> None:
+    payload = {
+        "schema": _CATALOG_CACHE_SCHEMA,
+        "fetched_at": time.time(),
+        "sha256": _catalog_digest(rows),
+        "rows": rows,
+    }
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.flush()
+            temporary = Path(handle.name)
+        temporary.replace(path)
+    except OSError:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _rm_flags(value: object) -> tuple[str, ...]:
+    text = str(value or "")
+    return tuple(flag for flag in _RM_FLAG_ORDER if flag in text)
+
+
+def _public_filing(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key not in _INTERNAL_FILING_KEYS}
+
+
+def _report_chain_key(row: Mapping[str, Any]) -> tuple[object, ...]:
+    report_name = re.sub(
+        r"^\s*(?:\[(?:기재|첨부|변경|연장|발행조건|정정)[^\]]*\]\s*)+",
+        "",
+        str(row.get("report_nm") or ""),
+    )
+    return (
+        str(row.get("corp_code") or ""),
+        _normalize_token(report_name),
+        row.get("base_year"),
+        row.get("base_month"),
+    )
+
+
+def _search_subchunks(text: str) -> tuple[str, ...]:
+    if len(text) <= _SEARCH_CHUNK_CHARS:
+        return (text,) if text else ()
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines() or [text]:
+        pieces = [
+            line[offset : offset + _SEARCH_CHUNK_CHARS]
+            for offset in range(0, max(1, len(line)), _SEARCH_CHUNK_CHARS)
+        ] or [""]
+        for piece in pieces:
+            added = len(piece) + (1 if current else 0)
+            if current and current_length + added > _SEARCH_CHUNK_CHARS:
+                chunks.append("\n".join(current))
+                current = []
+                current_length = 0
+            if piece:
+                current.append(piece)
+                current_length += len(piece) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append("\n".join(current))
+    return tuple(chunks)
 
 
 class OpenDartError(RuntimeError):
@@ -263,14 +438,29 @@ class OpenDartClient:
         # the transport boundary and is never included in an exception message.
         request_params = {str(key): str(value) for key, value in params.items()}
         request_params["crtfc_key"] = self.config.api_key
+        request_remaining = request_remaining_seconds()
+        if request_cancelled() or (
+            request_remaining is not None and request_remaining <= 0.05
+        ):
+            raise OpenDartTransportError(endpoint)
+        connect_timeout = float(self.config.connect_timeout_seconds)
+        read_timeout = float(self.config.read_timeout_seconds)
+        if request_remaining is not None:
+            connect_timeout = min(
+                connect_timeout, max(0.01, request_remaining / 4.0)
+            )
+            read_timeout = min(
+                read_timeout,
+                max(0.01, request_remaining - connect_timeout - 0.01),
+            )
         try:
             started = time.monotonic()
             response = self._session.get(
                 self._url(endpoint),
                 params=request_params,
                 timeout=(
-                    float(self.config.connect_timeout_seconds),
-                    float(self.config.read_timeout_seconds),
+                    connect_timeout,
+                    read_timeout,
                 ),
                 stream=True,
             )
@@ -286,7 +476,11 @@ class OpenDartClient:
             body = bytearray()
             try:
                 for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if time.monotonic() - started > 60 or len(body) + len(chunk) > 64 * 1024 * 1024:
+                    if (
+                        request_cancelled()
+                        or time.monotonic() - started > 60
+                        or len(body) + len(chunk) > 64 * 1024 * 1024
+                    ):
                         raise OpenDartTransportError(endpoint)
                     body.extend(chunk)
             except (requests.RequestException, TimeoutError, OSError):
@@ -819,14 +1013,35 @@ class OpenDartSource:
         universe_csv: Path | str | None = None,
         *,
         runtime_identity: str = "opendart-runtime",
+        catalog_cache_path: Path | str | None = None,
+        catalog_cache_max_age_seconds: float = _CATALOG_CACHE_MAX_AGE_SECONDS,
     ) -> None:
         if not isinstance(client, OpenDartClient):
             raise ValueError("client must be OpenDartClient")
         if not isinstance(runtime_identity, str) or not runtime_identity or "/" in runtime_identity or "\\" in runtime_identity:
             raise ValueError("runtime_identity must be a path-safe non-empty string")
+        if (
+            type(catalog_cache_max_age_seconds) not in {int, float}
+            or not 60 <= float(catalog_cache_max_age_seconds) <= 30 * 24 * 60 * 60
+        ):
+            raise ValueError("catalog_cache_max_age_seconds must be within 60 seconds and 30 days")
         self.client = client
+        self._catalog_cache_path = (
+            Path(catalog_cache_path) if catalog_cache_path is not None else None
+        )
+        cached_rows = (
+            _read_catalog_cache(
+                self._catalog_cache_path,
+                max_age_seconds=float(catalog_cache_max_age_seconds),
+            )
+            if self._catalog_cache_path is not None
+            else ()
+        )
         if universe_csv is not None and Path(universe_csv).is_file():
             self.company_resolver: CompanyResolver | None = CompanyResolver(universe_csv)
+            self._company_catalog_loaded = True
+        elif cached_rows:
+            self.company_resolver = CompanyResolver(rows=cached_rows)
             self._company_catalog_loaded = True
         else:
             # The complete corpCode.xml response can be slow. Keep startup and
@@ -838,6 +1053,25 @@ class OpenDartSource:
         self.pipeline_release = self.release
         self._documents: OrderedDict[str, _Document] = OrderedDict()
         self._filings: dict[str, dict[str, Any]] = {}
+        self._latest_watermark = ""
+
+    @property
+    def catalog_ready(self) -> bool:
+        return self._company_catalog_loaded and self.company_resolver is not None
+
+    def cache_watermark(self) -> str:
+        return self._latest_watermark
+
+    def warmup(self) -> None:
+        if self._company_catalog_loaded:
+            return
+        rows = self.client.corp_codes()
+        self._company_catalog_loaded = True
+        validated = _catalog_rows(rows)
+        if validated:
+            self.company_resolver = CompanyResolver(rows=validated)
+            if self._catalog_cache_path is not None:
+                _write_catalog_cache(self._catalog_cache_path, validated)
 
     def close(self) -> None:
         self.client.close()
@@ -845,12 +1079,9 @@ class OpenDartSource:
     def resolve_company(self, query: str) -> dict:
         if not self._company_catalog_loaded:
             try:
-                rows = self.client.corp_codes()
+                self.warmup()
             except OpenDartError as exc:
                 return self._failure(exc)
-            self._company_catalog_loaded = True
-            if rows:
-                self.company_resolver = CompanyResolver(rows=tuple(rows))
         if self.company_resolver is None:
             return _source_result(
                 "not_found",
@@ -1007,11 +1238,10 @@ class OpenDartSource:
             raise OpenDartMalformedResponse("/list.json")
         doc_group, doc_subtype, base_year, base_month = _report_info(report_nm)
         correction = _is_correction(report_nm)
-        # When latest_requested is True, OpenDART was queried with last_reprt_at=Y,
-        # which returns the latest report for each disclosure. Corrected filings
-        # returned under last_reprt_at=Y are the latest filings and must not be
-        # suppressed by is_latest=False.
-        is_latest = bool(latest_requested)
+        rm_flags = _rm_flags(raw.get("rm"))
+        withdrawn = "철" in rm_flags
+        superseded = "정" in rm_flags
+        is_latest = not withdrawn and not superseded
         row = {
             "doc_id": f"opendart-{receipt}",
             "rcept_no": receipt,
@@ -1030,8 +1260,14 @@ class OpenDartSource:
             "is_latest": is_latest,
             "root_rcept_no": receipt,  # local chain anchor; not a claimed external original
             "latest_rcept_no": receipt,
-            "correction_status": "unresolved_external_root" if correction else "original",
-            "correction_method": "",
+            "correction_status": (
+                "withdrawn"
+                if withdrawn
+                else ("unresolved_external_root" if correction else "original")
+            ),
+            "correction_method": "rm_withdrawal" if withdrawn else "",
+            "rm": _compact(raw.get("rm")),
+            "rm_flags": list(rm_flags),
             "event_type": _event_type(report_nm),
             "event_date": rcept_dt,
             "amount": None,
@@ -1047,7 +1283,99 @@ class OpenDartSource:
             "dart_url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
         }
         self._filings[receipt] = row
+        self._advance_watermark(row)
         return row
+
+    def _advance_watermark(self, row: Mapping[str, Any]) -> None:
+        candidate = f"{row.get('rcept_dt', '')}:{row.get('rcept_no', '')}"
+        if candidate > self._latest_watermark:
+            self._latest_watermark = candidate
+
+    def _apply_correction_lineage(
+        self, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        affected = {_report_chain_key(row) for row in rows}
+        for key in affected:
+            group = sorted(
+                (
+                    row
+                    for row in self._filings.values()
+                    if _report_chain_key(row) == key
+                ),
+                key=lambda row: (str(row["rcept_dt"]), str(row["rcept_no"])),
+            )
+            for row in group:
+                receipt = str(row["rcept_no"])
+                flags = tuple(row.get("rm_flags") or ())
+                withdrawn = "철" in flags
+                row.update(
+                    {
+                        "root_rcept_no": receipt,
+                        "latest_rcept_no": receipt,
+                        "is_latest": not withdrawn and "정" not in flags,
+                        "correction_status": (
+                            "withdrawn"
+                            if withdrawn
+                            else (
+                                "unresolved_external_root"
+                                if row.get("is_correction") is True
+                                else "original"
+                            )
+                        ),
+                        "correction_method": (
+                            "rm_withdrawal" if withdrawn else ""
+                        ),
+                    }
+                )
+            for index, correction in enumerate(group):
+                if (
+                    correction.get("is_correction") is not True
+                    or "철" in tuple(correction.get("rm_flags") or ())
+                ):
+                    continue
+                predecessor = next(
+                    (
+                        candidate
+                        for candidate in reversed(group[:index])
+                        if "정" in tuple(candidate.get("rm_flags") or ())
+                        and "철" not in tuple(candidate.get("rm_flags") or ())
+                    ),
+                    None,
+                )
+                if predecessor is None:
+                    continue
+                root = str(predecessor.get("root_rcept_no") or predecessor["rcept_no"])
+                correction.update(
+                    {
+                        "root_rcept_no": root,
+                        "correction_status": "linked",
+                        "correction_method": "rm_report_key",
+                    }
+                )
+                chain = [
+                    candidate
+                    for candidate in group[: index + 1]
+                    if str(candidate.get("root_rcept_no")) == root
+                    or str(candidate.get("rcept_no")) == root
+                ]
+                latest_receipt = str(correction["rcept_no"])
+                for candidate in chain:
+                    candidate["root_rcept_no"] = root
+                    candidate["latest_rcept_no"] = latest_receipt
+                    candidate["is_latest"] = (
+                        candidate is correction
+                        and "정" not in tuple(correction.get("rm_flags") or ())
+                    )
+        return [self._filings[str(row["rcept_no"])] for row in rows]
+
+    def _ingest_filings(
+        self, raw_rows: list[dict[str, Any]], *, latest_requested: bool
+    ) -> list[dict[str, Any]]:
+        rows = [
+            self._filing(item, latest_requested=latest_requested)
+            for item in raw_rows
+        ]
+        return self._apply_correction_lineage(rows)
 
     @staticmethod
     def _matches_filing(
@@ -1107,10 +1435,10 @@ class OpenDartSource:
                 end_de=end_de,
                 pblntf_ty=pblntf_ty,
                 pblntf_detail_ty=detail,
-                latest_only=latest_only,
+                latest_only=False,
                 scan_limit=max(limit * 4, limit),
             )
-            rows = [self._filing(item, latest_requested=latest_only) for item in raw]
+            rows = self._ingest_filings(raw, latest_requested=False)
         except OpenDartError as exc:
             return self._failure(exc)
         selected = [
@@ -1130,7 +1458,7 @@ class OpenDartSource:
         selected.sort(key=lambda row: (row["rcept_dt"], row["rcept_no"]), reverse=True)
         data: list[dict[str, Any]] = []
         for row in selected[:limit]:
-            item = dict(row)
+            item = _public_filing(row)
             item["citation"] = _citation(row)
             data.append(item)
         citations = [item["citation"] for item in data]
@@ -1194,10 +1522,10 @@ class OpenDartSource:
                 corp_code,
                 bgn_de=bgn_de,
                 end_de=end_de,
-                latest_only=latest_only,
+                latest_only=False,
                 scan_limit=max(limit * 8, 50),
             )
-            rows = [self._filing(item, latest_requested=latest_only) for item in raw]
+            rows = self._ingest_filings(raw, latest_requested=False)
         except OpenDartError as exc:
             return self._failure(exc)
         wanted = {_normalize_token(item) for item in event_types or ()}
@@ -1221,7 +1549,7 @@ class OpenDartSource:
             # explicitly empty so amount predicates cannot invent a match.
             if filters.get("amount_min") is not None or filters.get("amount_max") is not None:
                 continue
-            item = dict(row)
+            item = _public_filing(row)
             item["citation"] = _citation(row, f"event:{row['event_type']}")
             selected.append(item)
             if len(selected) >= limit:
@@ -1253,7 +1581,8 @@ class OpenDartSource:
         )
         for item in raw:
             if str(item.get("rcept_no")) == receipt:
-                return self._filing(item, latest_requested=False)
+                rows = self._ingest_filings([dict(item)], latest_requested=False)
+                return rows[0]
         if limitations:
             raise OpenDartError("OpenDART receipt metadata search was bounded")
         raise OpenDartNotFound("OpenDART receipt metadata was not found")
@@ -1438,7 +1767,15 @@ class OpenDartSource:
                 "n_chars": sum(len(chunk) for chunk in section.chunks),
                 "n_tables": section.n_tables,
                 "parts": list(range(1, len(section.chunks) + 1)),
-                **document.filing,
+                "doc_id": str(document.filing.get("doc_id") or ""),
+                "rcept_no": str(document.filing.get("rcept_no") or ""),
+                "corp_code": str(document.filing.get("corp_code") or ""),
+                "corp_name": str(document.filing.get("corp_name") or ""),
+                "report_nm": str(document.filing.get("report_nm") or ""),
+                "rcept_dt": str(document.filing.get("rcept_dt") or ""),
+                "doc_subtype": document.filing.get("doc_subtype"),
+                "base_year": document.filing.get("base_year"),
+                "base_month": document.filing.get("base_month"),
             }
             row["citation"] = _citation(document.filing, section.path)
             rows.append(row)
@@ -1500,11 +1837,13 @@ class OpenDartSource:
     def search_chunks(self, query: str, **filters: Any) -> dict:
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
             return _source_result("info_limit", [], limitations=["query must be 1..1000 characters"])
-        tokens = [
-            token.casefold()
-            for token in _TOKEN_RE.findall(query)
-            if len(token) >= 2 and token not in _STOP_TOKENS
-        ]
+        tokens = list(
+            dict.fromkeys(
+                token.casefold()
+                for token in _TOKEN_RE.findall(query)
+                if len(token) >= 2 and token.casefold() not in _STOP_TOKENS
+            )
+        )
         if not tokens:
             return _source_result("info_limit", [], limitations=["query has no useful bounded token"])
         corp_code = filters.get("corp_code")
@@ -1526,6 +1865,13 @@ class OpenDartSource:
         path_hint = filters.get("path_hint")
         if path_hint is not None and not isinstance(path_hint, str):
             return _source_result("error", {}, limitations=["path_hint must be a string"])
+        hint_tokens = tuple(
+            dict.fromkeys(
+                token.casefold()
+                for token in _TOKEN_RE.findall(path_hint or "")
+                if len(token) >= 2 and token.casefold() not in _STOP_TOKENS
+            )
+        )
 
         target_year: int | None = None
         if base_year is not None and isinstance(base_year, int) and 2015 <= base_year <= 2100:
@@ -1600,10 +1946,10 @@ class OpenDartSource:
                 end_de=end_de,
                 pblntf_ty="A" if doc_subtype in {"annual", "half", "quarter"} else None,
                 pblntf_detail_ty=_DETAIL_BY_SUBTYPE.get(doc_subtype),
-                latest_only=latest_only,
+                latest_only=False,
                 scan_limit=max(k * 4, 20),
             )
-            filings = [self._filing(item, latest_requested=latest_only) for item in raw]
+            filings = self._ingest_filings(raw, latest_requested=False)
             candidates = [
                 row
                 for row in filings
@@ -1616,7 +1962,9 @@ class OpenDartSource:
             local_documents: dict[str, _Document] = {}
             new_downloads = 0
             unexplored_candidates = False
-            ranked: list[tuple[float, dict[str, Any], str]] = []
+            ranked: list[
+                tuple[float, dict[str, Any], str, int, int, str]
+            ] = []
             for filing in candidates:
                 receipt = str(filing.get("rcept_no") or "")
                 document = local_documents.get(receipt)
@@ -1636,29 +1984,59 @@ class OpenDartSource:
                             continue
                         local_documents[receipt] = document
                 for section in document.sections:
-                    if path_hint and path_hint not in section.path:
+                    folded_path = section.path.casefold()
+                    hint_hits = sum(
+                        1 for token in hint_tokens if token in folded_path
+                    )
+                    if path_hint and not hint_hits and path_hint.casefold() not in folded_path:
                         continue
                     for part, text in enumerate(section.chunks, 1):
-                        folded = text.casefold()
-                        hits = sum(folded.count(token) for token in tokens)
-                        if hits:
-                            score = -(hits / max(1, len(tokens)))
-                            ranked.append((score, filing, section.path + "\0" + str(part)))
-            ranked.sort(key=lambda item: (item[0], item[1]["rcept_dt"], item[1]["rcept_no"]))
+                        for subpart, subchunk in enumerate(
+                            _search_subchunks(text), 1
+                        ):
+                            folded = subchunk.casefold()
+                            body_hits = sum(
+                                min(8, folded.count(token)) for token in tokens
+                            )
+                            path_hits = sum(
+                                1 for token in tokens if token in folded_path
+                            )
+                            phrase_bonus = 2 if query.strip().casefold() in folded else 0
+                            score = (
+                                body_hits
+                                + 3 * path_hits
+                                + 5 * hint_hits
+                                + phrase_bonus
+                            ) / max(1, len(tokens))
+                            if score > 0:
+                                ranked.append(
+                                    (
+                                        score,
+                                        filing,
+                                        section.path,
+                                        part,
+                                        subpart,
+                                        subchunk,
+                                    )
+                                )
+            ranked.sort(
+                key=lambda item: (
+                    -item[0],
+                    -int(str(item[1]["rcept_dt"])),
+                    -int(str(item[1]["rcept_no"])),
+                    item[2],
+                    item[3],
+                    item[4],
+                )
+            )
             data: list[dict[str, Any]] = []
-            for score, filing, section_part in ranked[:k]:
-                path, part_text = section_part.split("\0", 1)
-                part = int(part_text)
-                receipt = str(filing.get("rcept_no") or "")
-                document = local_documents[receipt]
-                section = next(item for item in document.sections if item.path == path)
-                text = section.chunks[part - 1]
+            for score, filing, path, part, subpart, text in ranked[:k]:
                 item = {
-                    "chunk_id": f"{filing['doc_id']}:{path}:{part}",
+                    "chunk_id": f"{filing['doc_id']}:{path}:{part}.{subpart}",
                     "doc_id": filing["doc_id"],
                     "path": path,
                     "text": text,
-                    "score": score,
+                    "score": -score,
                     "citation": _citation(filing, path),
                 }
                 data.append(item)
@@ -1684,11 +2062,61 @@ class OpenDartSource:
             return _source_result("not_found", {}, limitations=["OpenDART filing metadata was not found"])
         except OpenDartError as exc:
             return self._failure(exc)
-        # list.json does not expose predecessor edges. Equal report titles
-        # alone cannot establish a correction chain (events may repeat).
+        root = str(target.get("root_rcept_no") or receipt)
+        chain = sorted(
+            (
+                row
+                for row in self._filings.values()
+                if str(row.get("root_rcept_no") or row.get("rcept_no")) == root
+            ),
+            key=lambda row: (str(row["rcept_dt"]), str(row["rcept_no"])),
+        )
+        verified = (
+            len(chain) > 1
+            and any(row.get("correction_status") == "linked" for row in chain)
+        ) or target.get("correction_status") == "withdrawn"
+        if not verified:
+            return _source_result(
+                "info_limit",
+                {},
+                limitations=[
+                    "OpenDART disclosure metadata does not establish a verified correction chain"
+                ],
+            )
+        items: list[dict[str, Any]] = []
+        for row in chain:
+            item = _public_filing(row)
+            item["citation"] = _citation(row)
+            items.append(item)
+        queried_correction = None
+        if target.get("is_correction") is True or target.get("correction_status") == "withdrawn":
+            status = str(target.get("correction_status") or "")
+            queried_correction = {
+                "status": status,
+                "method": str(target.get("correction_method") or ""),
+                "confidence": "high",
+                "evidence": [
+                    "list.rm=철"
+                    if status == "withdrawn"
+                    else "list.rm=정 + normalized_report_key"
+                ],
+                "candidates": [],
+                "citation": _citation(target),
+            }
+        latest = max(
+            (str(row.get("latest_rcept_no") or row["rcept_no"]) for row in chain)
+        )
+        data = {
+            "root_rcept_no": root,
+            "latest_rcept_no": latest,
+            "chain": items,
+            "queried_correction": queried_correction,
+        }
         return _source_result(
-            "info_limit", {},
-            limitations=["OpenDART disclosure metadata does not establish a verified correction chain"],
+            "ok",
+            data,
+            citations=[item["citation"] for item in items],
+            endpoint="/list.json",
         )
 
 

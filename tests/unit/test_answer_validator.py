@@ -1546,6 +1546,77 @@ def test_trusted_multi_company_calculation_uses_exact_evidence_dropped_by_packer
     assert AnswerValidator().validate(response, run) == ()
 
 
+def test_prior_period_growth_accepts_year_grounded_by_report_period() -> None:
+    """A report period such as 2023.12 must ground the derived 2023 year label."""
+
+    def annual_sales(year: int, receipt: str, value: str) -> EvidenceItem:
+        citation = {
+            **_citation(rcept_no=receipt),
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "report_nm": f"사업보고서 ({year}.12)",
+            "rcept_dt": f"{year + 1}0311",
+            "section": "III. 재무에 관한 사항 > 연결 손익계산서",
+        }
+        return EvidenceItem(
+            f"sales-{year}",
+            f"(단위 : 원)\n| 매출액 | {value} |",
+            citation,
+            "search_chunks",
+            1,
+            1,
+        )
+
+    before = annual_sales(2023, "20240312000736", "100")
+    after = annual_sales(2024, "20250311001085", "120")
+    answer = (
+        "2023년 연결 매출액은 100원이고, 2024년 연결 매출액은 120원입니다. "
+        "2023년 대비 2024년 증가율은 20.00%입니다. "
+        f"{citation_token(before.citation)}{citation_token(after.citation)}"
+    )
+    calculation = ToolDispatchResult(
+        "calculate",
+        "ok",
+        MappingProxyType(
+            {
+                "operation": "percent_change",
+                "inputs": ("100", "120"),
+                "scale": 2,
+                "rounding": "ROUND_HALF_UP",
+                "result": "20.00",
+            }
+        ),
+        (),
+        (),
+        (),
+        None,
+        ToolLineage("pipeline-release", "retrieval-release"),
+    )
+    evidence = (before, after)
+    run = replace(
+        _run(answer=""),
+        answer_draft=answer,
+        packed_context=pack_context(evidence),
+        evidence=evidence,
+        calculations=(calculation,),
+        limitations=("deterministic_answer",),
+        audit=(AuditEvent("final_generated", status="calculated_growth"),),
+    )
+    question = "삼성전자 2024년 연결 매출액의 전년 대비 증가율은?"
+    candidate = AnswerResponse(
+        question_id=run.question_id,
+        question=question,
+        retrieved_context=run.packed_context.rendered_context,
+        think_trace="",
+        answer=answer,
+    )
+
+    assert AnswerValidator().validate(candidate, run) == ()
+    built = GroundedAnswerBuilder().build(question, run)
+    assert not is_safe_fallback_answer(built.answer)
+    assert "20.00%" in built.answer
+
+
 def test_no_evidence_accepts_only_deterministic_information_limit() -> None:
     run = _run(answer="", outcome="information_limit")
     validator = AnswerValidator()

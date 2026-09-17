@@ -169,6 +169,21 @@ def test_health_is_ready_only_after_successful_startup() -> None:
     }
 
 
+def test_startup_warms_a_service_before_marking_it_ready() -> None:
+    service = Service(response())
+    service.warmup_calls = 0
+
+    def warmup() -> None:
+        service.warmup_calls += 1
+
+    service.warmup = warmup  # type: ignore[attr-defined]
+
+    result = asyncio.run(_get(app(service), "/healthz"))
+
+    assert result.status_code == 200
+    assert service.warmup_calls == 1
+
+
 def test_startup_artifact_failure_is_not_degraded_to_ready() -> None:
     def fail_startup() -> Service:
         raise RuntimeError("artifact manifest mismatch")

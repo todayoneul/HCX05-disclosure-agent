@@ -3239,6 +3239,113 @@ def test_percent_worded_growth_uses_deterministic_preflight() -> None:
     )
 
 
+def test_single_year_prior_period_growth_uses_deterministic_preflight() -> None:
+    # "2024년 ... 전년 대비 증가율" names one year plus an explicit prior-period
+    # reference; the deterministic path must resolve both comparison years so
+    # the growth rate is computed with Decimal instead of the model guessing.
+    from disclosure_agent.agent.runner import _growth_comparison_years
+
+    question = "삼성전자 2024년 연결 매출액의 전년 대비 증가율은?"
+    assert _requires_single_company_growth_preflight(question)
+    assert sorted(_growth_comparison_years(question)) == [2023, 2024]
+    # A single year with no prior-period marker must not fabricate a second year.
+    assert not _requires_single_company_growth_preflight(
+        "삼성전자 2024년 연결 매출액 증가율은?"
+    )
+
+
+def test_single_year_prior_period_growth_runs_both_years_without_model() -> None:
+    question = "삼성전자 2024년 연결 매출액의 전년 대비 증가율은?"
+    receipts = {
+        2023: "20240312000736",
+        2024: "20250311001085",
+    }
+
+    class PriorPeriodGrowthRegistry(Registry):
+        def dispatch(
+            self, name: str, arguments: dict[str, object]
+        ) -> ToolDispatchResult:
+            self.dispatched.append((name, arguments))
+            if name == "resolve_company":
+                return ToolDispatchResult(
+                    name,
+                    "ok",
+                    _freeze_json(
+                        {"corp_code": "00126380", "corp_name": "삼성전자"},
+                        "company",
+                    ),
+                    (),
+                    (),
+                    (),
+                    None,
+                    self.lineage,
+                )
+            if name == "search_chunks":
+                year = int(arguments["base_year"])
+                value = "100" if year == 2023 else "120"
+                receipt = receipts[year]
+                item = EvidenceItem(
+                    f"sales-{year}",
+                    f"(단위 : 원)\n| 매출액 | {value} |",
+                    {
+                        **CANONICAL_CITATION,
+                        "corp_code": "00126380",
+                        "corp_name": "삼성전자",
+                        "rcept_no": receipt,
+                        "root_rcept_no": receipt,
+                        "latest_rcept_no": receipt,
+                        "report_nm": f"사업보고서 ({year}.12)",
+                        "section": (
+                            "III. 재무에 관한 사항 > 2. 연결재무제표 > "
+                            "2-2. 연결 손익계산서"
+                        ),
+                    },
+                    "search_chunks",
+                    1,
+                    1,
+                )
+                return ToolDispatchResult(
+                    name,
+                    "ok",
+                    MappingProxyType({"count": 1}),
+                    (),
+                    (),
+                    (item,),
+                    None,
+                    self.lineage,
+                )
+            if name == "calculate":
+                assert arguments == {
+                    "operation": "percent_change",
+                    "inputs": ["100", "120"],
+                    "scale": 2,
+                }
+                return ToolDispatchResult(
+                    name,
+                    "ok",
+                    MappingProxyType({"result": "20.00"}),
+                    (),
+                    (),
+                    (),
+                    None,
+                    self.lineage,
+                )
+            raise AssertionError(f"unexpected tool: {name}")
+
+    registry = PriorPeriodGrowthRegistry()
+    outcome = AgentRunner(Gateway([]), registry).run("prior-period-growth", question)
+
+    assert outcome.outcome == "completed"
+    assert outcome.model_call_count == 0
+    assert outcome.tool_call_count == 4
+    assert "2023년 대비 2024년 증가율은 20.00%" in outcome.answer_draft
+    assert [
+        int(arguments["base_year"])
+        for name, arguments in registry.dispatched
+        if name == "search_chunks"
+    ] == [2023, 2024]
+
+
 def test_multi_year_multi_metric_question_uses_bounded_searches() -> None:
     question = (
         "삼성전자의 2023년과 2024년 연결 매출액과 영업이익 추세를 "
@@ -10144,27 +10251,23 @@ def test_unrelated_later_exclusion_does_not_bypass_external_source_guard() -> No
     assert "scope_rejected:external_information" in outcome.limitations
 
 
-def test_gateway_completion_retries_once_on_transient_failure() -> None:
-    sentinel = object()
-
+def test_runner_delegates_retry_ownership_without_local_replay() -> None:
     class FlakyGateway:
         def __init__(self) -> None:
             self.calls = 0
 
         def complete(self, request: object, *, remaining_seconds: float) -> object:
             self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("transient 503")
-            return sentinel
+            raise RuntimeError("transient 503")
 
     gateway = FlakyGateway()
     runner = AgentRunner(gateway, Registry())
-    result = runner._complete_with_retry(object(), 10.0, lambda: 10.0)
-    assert result is sentinel
-    assert gateway.calls == 2  # one failure, one successful retry
+    with pytest.raises(RuntimeError, match="transient 503"):
+        runner._complete_model(object(), 10.0)
+    assert gateway.calls == 1
 
 
-def test_gateway_completion_reraises_after_persistent_failure() -> None:
+def test_runner_model_completion_rejects_exhausted_deadline() -> None:
     class DeadGateway:
         def __init__(self) -> None:
             self.calls = 0
@@ -10176,25 +10279,8 @@ def test_gateway_completion_reraises_after_persistent_failure() -> None:
     gateway = DeadGateway()
     runner = AgentRunner(gateway, Registry())
     with pytest.raises(RuntimeError):
-        runner._complete_with_retry(object(), 10.0, lambda: 10.0)
-    assert gateway.calls == 2  # bounded: does not retry forever
-
-
-def test_gateway_completion_does_not_retry_after_deadline() -> None:
-    class DeadGateway:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def complete(self, request: object, *, remaining_seconds: float) -> object:
-            self.calls += 1
-            raise RuntimeError("gateway down")
-
-    gateway = DeadGateway()
-    runner = AgentRunner(gateway, Registry())
-    # time remains for the first try (5.0), gone (0.0) for the retry
-    with pytest.raises(RuntimeError):
-        runner._complete_with_retry(object(), 5.0, lambda: 0.0)
-    assert gateway.calls == 1  # deadline consumed → no second attempt
+        runner._complete_model(object(), 0.0)
+    assert gateway.calls == 0
 
 
 def test_annual_sales_inputs_read_enumerated_revenue_rows() -> None:

@@ -128,3 +128,45 @@ def test_timed_out_work_never_overlaps_following_request() -> None:
 
     assert [result.status_code for result in results] == [503, 503]
     assert service.max_active == 1
+
+
+def test_timeout_signals_cooperative_cancellation_to_the_worker() -> None:
+    class CooperativeService:
+        def __init__(self) -> None:
+            self.cancelled = threading.Event()
+
+        def answer(self, question_id: str, question: str) -> AnswerResponse:
+            raise AssertionError("context-aware entrypoint must be used")
+
+        def answer_with_context(
+            self,
+            question_id: str,
+            question: str,
+            *,
+            deadline: float,
+            cancel_event: threading.Event,
+        ) -> AnswerResponse:
+            while not cancel_event.wait(0.005):
+                assert time.monotonic() < deadline + 1.0
+            self.cancelled.set()
+            return AnswerResponse(question_id, question, "", "안전 감사", "취소")
+
+    service = CooperativeService()
+    application = create_app(
+        lambda: service,
+        config=ServerConfig(
+            "pipeline-fixture",
+            "retrieval-fixture",
+            answer_timeout_seconds=0.02,
+        ),
+    )
+
+    result = asyncio.run(
+        _requests(
+            application,
+            ({"question_id": "Q-cancel", "question": "취소 질문"},),
+        )
+    )[0]
+
+    assert result.status_code == 503
+    assert service.cancelled.is_set()

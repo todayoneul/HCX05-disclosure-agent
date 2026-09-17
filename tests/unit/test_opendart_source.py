@@ -113,6 +113,7 @@ def _filing_row(
     rcept_dt: str | None = None,
     corp_code: str = "001",
     corp_name: str = "현대자동차",
+    rm: str = "",
 ) -> dict[str, str]:
     return {
         "corp_cls": "Y",
@@ -123,6 +124,7 @@ def _filing_row(
         "rcept_no": receipt,
         "flr_nm": corp_name,
         "rcept_dt": rcept_dt or receipt[:8],
+        "rm": rm,
     }
 
 
@@ -445,6 +447,71 @@ def test_equal_report_titles_do_not_create_an_unverified_history_chain(
     assert "verified correction chain" in response["limitations"][0]
     assert "chain" not in response["data"]
     assert len(client.json_calls) == 1
+
+
+def test_rm_correction_signal_builds_a_verified_bidirectional_chain(
+    tmp_path: Path,
+) -> None:
+    original_receipt = "20240301000001"
+    correction_receipt = "20240315000002"
+    rows = [
+        _filing_row(original_receipt, rm="연정"),
+        _filing_row(
+            correction_receipt,
+            report_nm="[기재정정] 사업보고서 (2022.12)",
+            rcept_dt="20240315",
+            rm="연",
+        ),
+    ]
+    client = StubOpenDartClient(payloads=[_list_payload(rows)])
+    source = _source_with_universe(client, tmp_path)
+
+    listed = source.list_filings("001", base_year=2022, latest_only=True)
+
+    assert listed["status"] == "ok"
+    assert [row["rcept_no"] for row in listed["data"]] == [correction_receipt]
+    latest = listed["data"][0]
+    assert latest["root_rcept_no"] == original_receipt
+    assert latest["latest_rcept_no"] == correction_receipt
+    assert latest["correction_status"] == "linked"
+    assert latest["correction_method"] == "rm_report_key"
+
+    history = source.get_history(rcept_no=original_receipt)
+    assert history["status"] == "ok"
+    assert history["data"]["root_rcept_no"] == original_receipt
+    assert history["data"]["latest_rcept_no"] == correction_receipt
+    assert [row["rcept_no"] for row in history["data"]["chain"]] == [
+        original_receipt,
+        correction_receipt,
+    ]
+    assert history["data"]["queried_correction"] is None
+
+    corrected_history = source.get_history(rcept_no=correction_receipt)
+    assert corrected_history["status"] == "ok"
+    assert corrected_history["data"]["queried_correction"]["status"] == "linked"
+
+
+def test_rm_withdrawal_is_not_exposed_as_a_latest_effective_filing(
+    tmp_path: Path,
+) -> None:
+    receipt = "20240320000003"
+    client = StubOpenDartClient(
+        payloads=[_list_payload([_filing_row(receipt, rm="유철")])]
+    )
+    source = _source_with_universe(client, tmp_path)
+
+    listed = source.list_filings("001", latest_only=False)
+
+    assert listed["status"] == "ok"
+    row = listed["data"][0]
+    assert row["is_latest"] is False
+    assert row["correction_status"] == "withdrawn"
+    assert row["correction_method"] == "rm_withdrawal"
+    # Internal lineage bookkeeping (rm/rm_flags) is never emitted on a tool row;
+    # the withdrawal is exposed through the canonical correction fields instead.
+    assert "rm" not in row
+    assert "rm_flags" not in row
+    assert row["citation"]["correction_status"] == "withdrawn"
 
 
 def test_unknown_receipt_does_not_return_invented_blank_metadata(
@@ -1460,3 +1527,142 @@ def test_search_chunks_broad_narrative_query_falls_back_to_document(tmp_path: Pa
     assert res["status"] == "ok"
     assert len(client.document_calls) == 1
     assert not any(call[0] == "/fnlttSinglAcnt.json" for call in client.json_calls)
+
+
+def test_search_chunks_can_match_a_section_path_when_body_omits_heading_terms(
+    tmp_path: Path,
+) -> None:
+    receipt = "20240315000011"
+    payload = _list_payload(
+        [_filing_row(receipt, report_nm="사업보고서 (2023.12)")]
+    )
+    document = _zip_member(
+        "report.xml",
+        (
+            '<DOCUMENT><TITLE ATOC="Y">II. 사업의 개요</TITLE>'
+            "<P>회사는 반도체와 모바일 기기를 제조하고 있습니다.</P>"
+            "</DOCUMENT>"
+        ).encode("utf-8"),
+    )
+    source = _source_with_universe(
+        StubOpenDartClient(payloads=[payload], documents={receipt: document}),
+        tmp_path,
+    )
+
+    result = source.search_chunks(
+        "사업의 개요",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        k=3,
+    )
+
+    assert result["status"] == "ok"
+    assert result["data"][0]["path"].endswith("사업의 개요")
+    assert "반도체" in result["data"][0]["text"]
+
+
+def test_search_chunks_returns_context_packer_sized_subchunks(tmp_path: Path) -> None:
+    receipt = "20240315000012"
+    payload = _list_payload(
+        [_filing_row(receipt, report_nm="사업보고서 (2023.12)")]
+    )
+    long_body = ("일반 사업 설명입니다.\n" * 300) + "초격차배터리 기술을 개발합니다."
+    document = _zip_member(
+        "report.xml",
+        (
+            '<DOCUMENT><TITLE ATOC="Y">II. 사업의 내용</TITLE>'
+            f"<P>{long_body}</P></DOCUMENT>"
+        ).encode("utf-8"),
+    )
+    source = _source_with_universe(
+        StubOpenDartClient(payloads=[payload], documents={receipt: document}),
+        tmp_path,
+    )
+
+    result = source.search_chunks(
+        "초격차배터리",
+        corp_code="001",
+        base_year=2023,
+        doc_subtype="annual",
+        path_hint="사업의 내용",
+        k=3,
+    )
+
+    assert result["status"] == "ok"
+    assert any("초격차배터리" in row["text"] for row in result["data"])
+    assert all(len(row["text"]) <= 2_400 for row in result["data"])
+
+
+def test_company_catalog_warmup_persists_and_reuses_valid_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "opendart-company-catalog.json"
+    rows = [
+        {
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "listed_name": "삼성전자",
+            "stock_code": "005930",
+            "sector": "",
+        }
+    ]
+    first_client = StubOpenDartClient(corp_rows=rows)
+    first = OpenDartSource(first_client, catalog_cache_path=cache_path)
+
+    first.warmup()
+
+    assert first.catalog_ready is True
+    assert first_client.corp_codes_calls == 1
+    assert cache_path.is_file()
+    assert "fixture-open-dart" not in cache_path.read_text(encoding="utf-8")
+
+    second_client = StubOpenDartClient()
+    second = OpenDartSource(second_client, catalog_cache_path=cache_path)
+    assert second.catalog_ready is True
+    resolved = second.resolve_company("삼성전자")
+    assert resolved["status"] == "ok"
+    assert resolved["data"]["corp_code"] == "00126380"
+    assert second_client.corp_codes_calls == 0
+
+
+def test_company_catalog_keeps_alphanumeric_stock_codes_and_skips_bad_rows(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "opendart-company-catalog.json"
+    rows = [
+        {
+            "corp_code": "00111111",
+            "corp_name": "우선주회사",
+            "listed_name": "우선주회사",
+            "stock_code": "0068Y0",
+            "sector": "",
+        },
+        {
+            "corp_code": "",
+            "corp_name": "고유번호없음",
+            "listed_name": "고유번호없음",
+            "stock_code": "",
+            "sector": "",
+        },
+        {
+            "corp_code": "00222222",
+            "corp_name": "정상회사",
+            "listed_name": "정상회사",
+            "stock_code": "005930",
+            "sector": "",
+        },
+    ]
+    source = OpenDartSource(
+        StubOpenDartClient(corp_rows=rows), catalog_cache_path=cache_path
+    )
+
+    source.warmup()
+
+    assert source.catalog_ready is True
+    preferred = source.resolve_company("0068Y0")
+    assert preferred["status"] == "ok"
+    assert preferred["data"]["corp_code"] == "00111111"
+    normal = source.resolve_company("정상회사")
+    assert normal["status"] == "ok"
+    assert normal["data"]["corp_code"] == "00222222"

@@ -7,8 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hashlib
+from functools import partial
 import logging
 import math
+import threading
 import time
 from typing import Callable, Protocol
 
@@ -98,6 +100,15 @@ def create_app(
         if not callable(getattr(service, "answer", None)):
             raise RuntimeError("answer service contract differs")
         application.state.service = service
+        warmup = getattr(service, "warmup", None)
+        if callable(warmup):
+            try:
+                await asyncio.to_thread(warmup)
+            except Exception:
+                close = getattr(service, "close", None)
+                if callable(close):
+                    await asyncio.to_thread(close)
+                raise
         identity = getattr(service, "identity", None)
         lineage = getattr(identity, "lineage", None)
         application.state.pipeline_release = getattr(
@@ -146,19 +157,42 @@ def create_app(
             return _safe_error(422, "invalid_request")
         request_hash = _request_hash(question_id, question)
         started = time.monotonic()
+        cancel_event = threading.Event()
         try:
             async with application.state.answer_semaphore:
                 loop = asyncio.get_running_loop()
+                deadline = time.monotonic() + config.answer_timeout_seconds
+                answer_with_context = getattr(
+                    application.state.service, "answer_with_context", None
+                )
+                invocation = (
+                    partial(
+                        answer_with_context,
+                        question_id,
+                        question,
+                        deadline=deadline,
+                        cancel_event=cancel_event,
+                    )
+                    if callable(answer_with_context)
+                    else partial(
+                        application.state.service.answer,
+                        question_id,
+                        question,
+                    )
+                )
                 future = loop.run_in_executor(
                     application.state.answer_executor,
-                    application.state.service.answer,
-                    question_id,
-                    question,
+                    invocation,
                 )
-                result = await asyncio.wait_for(
-                    asyncio.shield(future),
-                    timeout=config.answer_timeout_seconds,
-                )
+                try:
+                    result = await asyncio.wait_for(
+                        future,
+                        timeout=max(0.001, deadline - time.monotonic()),
+                    )
+                except TimeoutError:
+                    cancel_event.set()
+                    future.cancel()
+                    raise
             if (
                 not isinstance(result, AnswerResponse)
                 or result.question_id != question_id

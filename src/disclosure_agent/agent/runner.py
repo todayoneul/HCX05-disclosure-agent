@@ -16,6 +16,10 @@ from typing import Any, Callable, Mapping
 from disclosure_agent.context import ContextPack, ContextPackingError, EvidenceItem, PackerConfig, pack_context
 from disclosure_agent.hcx import HcxChatResult, NativeV3Request, TokenLimit, ToolCall
 from disclosure_agent.tool_registry import ToolDispatchError, ToolDispatchResult, ToolLineage
+from disclosure_agent.execution import (
+    current_request_deadline,
+    request_cancelled,
+)
 
 from .contracts import AgentConfig, AgentRunResult, AuditEvent, ModelGateway, validate_question
 from .answer_contract import build_answer_contract, citation_token
@@ -604,6 +608,26 @@ def _question_base_years(question: str) -> set[int]:
     }
 
 
+# A user often phrases a single-year growth question with an explicit
+# prior-period reference ("2024년 매출액의 전년 대비 증가율") instead of naming
+# both years.  Resolve the two comparison years deterministically: the two
+# explicit years when given, or one base year and its immediate predecessor
+# when a 전년/전기/직전 marker is present.  This keeps the growth calculation on
+# the deterministic Decimal path instead of delegating it to the model.
+_PRIOR_PERIOD_MARKER = re.compile(r"전년|전기|직전\s*(?:년|연도|사업연도|기)")
+
+
+def _growth_comparison_years(question: str) -> set[int]:
+    years = _question_base_years(question)
+    if len(years) == 2:
+        return years
+    if len(years) == 1 and _PRIOR_PERIOD_MARKER.search(question) is not None:
+        base = next(iter(years))
+        if 2016 <= base <= 2100:
+            return {base - 1, base}
+    return years
+
+
 def _multi_company_search_arguments(
     question: str, corp_code: str
 ) -> dict[str, Any]:
@@ -842,7 +866,7 @@ def _requires_single_company_growth_preflight(question: str) -> bool:
         and any(marker in question for marker in ("매출", "영업수익"))
         and len(_requested_income_row_patterns(question)) == 1
         and growth_wording
-        and len(_question_base_years(question)) == 2
+        and len(_growth_comparison_years(question)) == 2
         and requested_base_month(question) in {None, 12}
         and _filing_date_year(question) is None
     )
@@ -911,7 +935,7 @@ def _single_company_growth_searches(
             "path_hint": "연결재무제표",
             "k": 3,
         }
-        for year in sorted(_question_base_years(question))
+        for year in sorted(_growth_comparison_years(question))
     )
 
 
@@ -8003,34 +8027,17 @@ class AgentRunner:
         self._registry = registry
         self._config = config
 
-    def _complete_with_retry(
+    def _complete_model(
         self,
         request: "NativeV3Request",
         remaining_seconds: float,
-        remaining_seconds_fn: Callable[[], float],
-        *,
-        attempts: int = 2,
     ) -> Any:
-        """Call the model gateway, retrying once on a transient failure while
-        time remains. The first attempt uses the caller's already-computed
-        budget (no extra clock read); retries recompute the remaining budget.
-        Persistent failures re-raise so callers still fail closed (never
-        fabricating an answer). A single flaky 5xx/timeout no longer costs an
-        otherwise-answerable question — accuracy is prioritised over latency."""
-        seconds = remaining_seconds
-        last_exc: Exception | None = None
-        for attempt in range(max(1, attempts)):
-            if attempt > 0:
-                seconds = remaining_seconds_fn()
-            if seconds <= 0:
-                break
-            try:
-                return self._gateway.complete(request, remaining_seconds=seconds)
-            except Exception as exc:  # noqa: BLE001 - transient gateway failure
-                last_exc = exc
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("model gateway not called before deadline")
+        """Delegate one attempt; the runtime gateway is the sole retry owner."""
+        if remaining_seconds <= 0 or request_cancelled():
+            raise RuntimeError("model gateway not called before deadline")
+        return self._gateway.complete(
+            request, remaining_seconds=remaining_seconds
+        )
 
     def run(self, question_id: str, question: str) -> AgentRunResult:
         question_id, question = validate_question(question_id, question, config=self._config)
@@ -8051,6 +8058,9 @@ class AgentRunner:
                 tool_call_count=0,
             )
         deadline = time.monotonic() + float(self._config.deadline_seconds)
+        external_deadline = current_request_deadline()
+        if external_deadline is not None:
+            deadline = min(deadline, external_deadline)
         evidence: list[EvidenceItem] = []
         calculations: list[ToolDispatchResult] = []
         limitations: list[str] = []
@@ -8121,6 +8131,8 @@ class AgentRunner:
             )
 
         def remaining() -> float:
+            if request_cancelled():
+                return 0.0
             return deadline - time.monotonic()
 
         def lineage_matches() -> bool:
@@ -8147,7 +8159,7 @@ class AgentRunner:
                 return None
             model_calls += 1
             try:
-                response = self._complete_with_retry(request, seconds, remaining)
+                response = self._complete_model(request, seconds)
             except Exception:
                 limitations.append("model_gateway_failed")
                 audit.append(AuditEvent("model_failed"))
@@ -11279,7 +11291,7 @@ class AgentRunner:
                         )
                     if single_company_growth_preflight:
                         growth_rows = _annual_sales_inputs(
-                            evidence, _question_base_years(question)
+                            evidence, _growth_comparison_years(question)
                         )
                         if len(growth_rows) != 2:
                             limitations.append("growth_operands_not_found")
@@ -13382,9 +13394,7 @@ class AgentRunner:
         )
         model_calls += 1
         try:
-            response = self._complete_with_retry(
-                request, remaining, lambda: deadline - time.monotonic()
-            )
+            response = self._complete_model(request, remaining)
         except Exception:
             limitations.append("model_gateway_failed")
             return self._result("information_limit", question_id, "", packed, evidence, calculations, limitations, audit, lineage, model_calls, tool_calls)

@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import threading
 from typing import Mapping
 
 import requests
@@ -160,6 +161,31 @@ class ProductionAnswerService:
     def answer(self, question_id: str, question: str) -> AnswerResponse:
         return self._runtime.answer(question_id, question)
 
+    def answer_with_context(
+        self,
+        question_id: str,
+        question: str,
+        *,
+        deadline: float,
+        cancel_event: threading.Event,
+    ) -> AnswerResponse:
+        return self._runtime.answer_with_context(
+            question_id,
+            question,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+
+    def warmup(self) -> None:
+        if self._source is not None:
+            warmup = getattr(self._source, "warmup", None)
+            if callable(warmup):
+                warmup()
+            if getattr(self._source, "catalog_ready", True) is not True:
+                raise StartupConfigurationError(
+                    "OpenDART company catalog is not ready"
+                )
+
     def close(self) -> None:
         if self._source is not None:
             close = getattr(self._source, "close", None)
@@ -197,7 +223,12 @@ def build_production_service(
         except Exception as exc:
             raise StartupConfigurationError(f"OpenDART config invalid: {exc}") from exc
         opendart_client = OpenDartClient(opendart_config, session=session)
-        opendart_source = OpenDartSource(client=opendart_client)
+        opendart_source = OpenDartSource(
+            client=opendart_client,
+            catalog_cache_path=(
+                paths.pipeline_root.parent / "opendart-company-catalog-v1.json"
+            ),
+        )
         registry = ToolRegistry(opendart_source, opendart_source)
     elif selected_source == "snapshot":
         pipeline = load_pipeline_snapshot(paths.pipeline_root)
@@ -249,6 +280,11 @@ def build_production_service(
         builder,
         identity=identity,
         config=runtime_config,
+        watermark_provider=(
+            getattr(opendart_source, "cache_watermark", None)
+            if opendart_source is not None
+            else None
+        ),
     )
     return ProductionAnswerService(
         runtime,

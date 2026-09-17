@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
+import math
+import time
 import unicodedata
+from typing import Callable
 
 from disclosure_agent.agent import AnswerResponse
 
@@ -20,6 +23,13 @@ class _CacheKey:
     retrieval_release: str
     prompt_config_version: str
     model_contract_version: str
+
+
+@dataclass(frozen=True)
+class _CacheEntry:
+    response: AnswerResponse
+    stored_at: float
+    watermark: str
 
 
 def _key(
@@ -47,11 +57,46 @@ def _key(
 class BoundedResponseCache:
     """LRU cache for final five-string responses; never persistent."""
 
-    def __init__(self, *, max_entries: int = 128) -> None:
+    def __init__(
+        self,
+        *,
+        max_entries: int = 128,
+        ttl_seconds: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
+        watermark_provider: Callable[[], str] | None = None,
+    ) -> None:
         if type(max_entries) is not int or not 1 <= max_entries <= 1_024:
             raise ValueError("max_entries must be within 1..1024")
+        if (
+            type(ttl_seconds) not in {int, float}
+            or not math.isfinite(float(ttl_seconds))
+            or not 0 < float(ttl_seconds) <= 86_400.0
+        ):
+            raise ValueError("ttl_seconds must be within 86400 seconds")
+        if not callable(clock):
+            raise ValueError("clock must be callable")
+        if watermark_provider is not None and not callable(watermark_provider):
+            raise ValueError("watermark_provider must be callable")
         self._max_entries = max_entries
-        self._entries: OrderedDict[_CacheKey, AnswerResponse] = OrderedDict()
+        self._ttl_seconds = float(ttl_seconds)
+        self._clock = clock
+        self._watermark_provider = watermark_provider
+        self._entries: OrderedDict[_CacheKey, _CacheEntry] = OrderedDict()
+
+    def _watermark(self) -> str | None:
+        if self._watermark_provider is None:
+            return ""
+        try:
+            value = self._watermark_provider()
+        except Exception:
+            return None
+        if (
+            not isinstance(value, str)
+            or len(value) > 128
+            or any(ord(character) < 32 for character in value)
+        ):
+            return None
+        return value
 
     def get(
         self,
@@ -61,9 +106,18 @@ class BoundedResponseCache:
         identity: RuntimeIdentity,
     ) -> AnswerResponse | None:
         key = _key(question_id, question, identity)
-        response = self._entries.get(key)
-        if response is None:
+        entry = self._entries.get(key)
+        if entry is None:
             return None
+        watermark = self._watermark()
+        if (
+            watermark is None
+            or watermark != entry.watermark
+            or self._clock() - entry.stored_at >= self._ttl_seconds
+        ):
+            self._entries.pop(key, None)
+            return None
+        response = entry.response
         if response.question_id != question_id or response.question != question:
             return None
         self._entries.move_to_end(key)
@@ -78,7 +132,10 @@ class BoundedResponseCache:
         if not isinstance(response, AnswerResponse):
             raise ValueError("response must be AnswerResponse")
         key = _key(response.question_id, response.question, identity)
-        self._entries[key] = response
+        watermark = self._watermark()
+        if watermark is None:
+            return
+        self._entries[key] = _CacheEntry(response, self._clock(), watermark)
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)

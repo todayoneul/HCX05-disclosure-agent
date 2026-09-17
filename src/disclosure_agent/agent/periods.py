@@ -12,7 +12,7 @@ _QUESTION_PERIODS = (
     (re.compile(r"(?<![0-9])4\s*분기|사업보고서"), 12),
 )
 _REPORT_PERIOD = re.compile(
-    r"(?<![0-9])20[0-9]{2}[./-](03|06|09|12)(?![0-9])"
+    r"(?<![0-9])(20[0-9]{2})[./-](03|06|09|12)(?![0-9])"
 )
 
 
@@ -31,7 +31,13 @@ def requested_base_month(question: str) -> int | None:
 def report_base_month(report_name: str) -> int | None:
     """Extract the periodic base month when a report name exposes YYYY.MM."""
     match = _REPORT_PERIOD.search(report_name)
+    return None if match is None else int(match.group(2))
+
+
+def report_base_year(report_name: str) -> int | None:
+    """Extract the fiscal base year when a report name exposes YYYY.MM."""
+    match = _REPORT_PERIOD.search(report_name)
     return None if match is None else int(match.group(1))
 
 
-__all__ = ["report_base_month", "requested_base_month"]
+__all__ = ["report_base_month", "report_base_year", "requested_base_month"]

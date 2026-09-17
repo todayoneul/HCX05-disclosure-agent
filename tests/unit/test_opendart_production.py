@@ -134,7 +134,12 @@ def test_opendart_startup_uses_api_source_without_legacy_csv(
     finally:
         service.close()
 
-    assert observed["kwargs"] == {}
+    assert observed["kwargs"] == {
+        "catalog_cache_path": (
+            _paths(tmp_path).pipeline_root.parent
+            / "opendart-company-catalog-v1.json"
+        )
+    }
     assert session.close_calls >= 1
 
 

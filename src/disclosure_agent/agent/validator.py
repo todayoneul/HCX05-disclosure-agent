@@ -27,7 +27,7 @@ from .financial_basis import (
     section_financial_basis,
     section_financial_statement,
 )
-from .periods import report_base_month, requested_base_month
+from .periods import report_base_month, report_base_year, requested_base_month
 from .prompts import is_open_narrative_question
 from .trace import render_think_trace
 
@@ -726,6 +726,23 @@ def _match_citation(parsed: dict[str, str | None], citation: Mapping[str, object
     return True
 
 
+def _citation_grounding_text(citation: Mapping[str, object]) -> str:
+    """Render citation metadata with an explicit fiscal-year grounding token.
+
+    ``2023.12`` is parsed as one decimal by the numeric validator.  Adding the
+    equivalent ``2023년`` token lets a cited annual report support the prior-year
+    label in deterministic growth answers without weakening numeric checks.
+    """
+    values = [
+        str(citation.get(key, ""))
+        for key in ("corp_name", "report_nm", "section", "rcept_no", "rcept_dt")
+    ]
+    year = report_base_year(str(citation.get("report_nm", "")))
+    if year is not None:
+        values.append(f"{year}년")
+    return " ".join(values)
+
+
 def _company_is_disclosed_merger_target(
     company: str,
     passage: PackedPassage | EvidenceItem,
@@ -893,16 +910,7 @@ class AnswerValidator:
                     [response.question]
                     + [passage.text for passage in matched_passages]
                     + [
-                        " ".join(
-                            str(passage.citation.get(key, ""))
-                            for key in (
-                                "corp_name",
-                                "report_nm",
-                                "section",
-                                "rcept_no",
-                                "rcept_dt",
-                            )
-                        )
+                        _citation_grounding_text(passage.citation)
                         for passage in matched_passages
                     ]
                     + [calculation_text]
@@ -989,11 +997,7 @@ class AnswerValidator:
             [response.question]
             + [passage.text for passage in passages]
             + [
-                " ".join(
-                    str(passage.citation[key])
-                    for key in ("corp_name", "report_nm", "section", "rcept_no", "rcept_dt")
-                    if key in passage.citation and passage.citation[key]
-                )
+                _citation_grounding_text(passage.citation)
                 for passage in passages
             ]
             + [
