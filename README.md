@@ -1,5 +1,7 @@
 # 금융 공시 질의응답 에이전트 (Disclosure Agent)
 
+[![CI](https://github.com/todayoneul/HCX05-disclosure-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/todayoneul/HCX05-disclosure-agent/actions/workflows/ci.yml)
+
 한국어 기업 공시를 분석하여 재무 수치, 공시 이벤트, 정정 내역, 기업 개요 및 사업 내용을 정확하게 답변하는 금융 특화 RAG(Retrieval-Augmented Generation) 시스템입니다. 금융 분석가와 개발자가 신뢰할 수 있는 공시 질의응답을 제공하도록 설계되었습니다. 금융감독원 OpenDART 실시간 공개 API를 단일 데이터 원천(Live, Read-only)으로 활용하며, 사전 구축된 대용량 코퍼스나 SQLite/FTS 인덱스 파일 없이도 즉시 구동됩니다. 기업 고유번호 카탈로그(`corpCode.xml`), 공시 목록(`list.json`), 정형 재무제표(`fnlttSinglAcnt.json`, `fnlttMultiAcnt.json`), 공시 원문 아카이브(`document.xml`) 엔드포인트를 사용하며, 정기보고서 주요 재무 지표는 정형 API 조회를 우선 적용하고 필요한 경우 원문 아카이브로 안전하게 폴백합니다. 기업 카탈로그는 검증된 로컬 캐시로 재사용하고, FastAPI 준비 상태를 공개하기 전에 웜업하여 첫 질의 지연을 줄입니다.
 
 ## 시스템 아키텍처
@@ -72,6 +74,10 @@ flowchart TB
 - **장애 유형화 및 데이터 부재 분리**: OpenDART의 인증 오류, 쿼터 소진, 서비스 장애, 전송 오류, 비정상 응답 등 유형화된 장애는 단순 데이터 부재로 취급하지 않고 명확한 에러로 분기합니다. 일시적 백엔드 장애는 캐시에 남기지 않으며, 정상 조회가 완료된 실제 데이터 부재 결과만 안전하게 캐싱합니다.
 - **검색·캐시 신선도 관리**: 섹션 경로와 본문 토큰을 함께 평가하고 컨텍스트 크기에 맞춘 2,400자 이하 청크를 반환합니다. 최종 응답 캐시는 5분 TTL과 프로세스가 관측한 최신 공시 워터마크로 무효화됩니다.
 - **협력적 실행 중단**: HCX 재시도는 런타임 게이트웨이가 한 번만 소유하며, 요청 타임아웃은 러너와 OpenDART 전송 계층까지 취소 신호와 잔여 시간으로 전파됩니다.
+
+## 자동 품질 검증
+
+모든 pull request와 `main` push는 GitHub Actions에서 잠금 파일 일관성, Python 3.13.11 및 uv 0.9.26 기반 설치, 전체 오프라인 테스트, 프로덕션 Docker 이미지 빌드를 검증합니다. CI는 HCX 및 OpenDART 자격 증명을 사용하지 않으며 저장소 읽기 권한만 가집니다. 기준선과 검증 범위는 [Phase 1 CI 보고서](docs/reviews/PHASE1_CI_REPORT.md)에 기록합니다.
 
 ## 빠른 시작 (Quick Start)
 
