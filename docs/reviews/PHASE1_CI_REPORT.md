@@ -90,10 +90,13 @@ docker build -t disclosure-agent:ci .
 
 ### GitHub Actions
 
-- Run URL: pending PR creation
-- Status: **NOT RUN**
+- Pull request: https://github.com/todayoneul/HCX05-disclosure-agent/pull/1
+- Validation run: https://github.com/todayoneul/HCX05-disclosure-agent/actions/runs/35300944303
+- Status: **PASSED**
+- `Offline quality gates`: **PASSED**
+- `Build production image`: **PASSED**
 
-This section must be updated with the actual workflow run URL and result after the branch is pushed and the pull request is created. A local pass is not treated as a GitHub Actions pass.
+The run validated commit `b8a61ddf596d0215703ac543602e5b965e223c46`. GitHub Actions installed Python and uv, verified the lock, installed locked dev/UI dependencies, ran the offline suite, and built the production image without HCX or OpenDART credentials. The local Docker result remains `NOT RUN`; the successful Docker result above is from GitHub Actions.
 
 ## 5. Deferred Work
 
