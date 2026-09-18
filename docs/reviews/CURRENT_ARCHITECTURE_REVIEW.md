@@ -407,6 +407,42 @@ Then run the repository completion gates and full suite. This respects TDD in th
 
 **Explicitly deferred:** queue deadline semantics, cache-volume architecture, unknown financial basis, CI, observability, and runner refactoring. Each changes a separate contract or deployment concern and needs its own tests and review.
 
+### Implemented result
+
+The selected change was completed without modifying application code or direct dependency pins. `uv.lock` now includes the already-declared `streamlit==1.41.1` UI extra and its transitive dependency graph. The generated delta is 475 insertions and four deletions; the only previously locked package version adjusted by resolution is `packaging` from `26.3` to `24.2`, which satisfies Streamlit's declared constraint.
+
+Post-change evidence:
+
+```text
+uv lock --check
+  PASS — resolved 60 packages
+
+uv sync --locked --extra dev
+  PASS
+
+uv sync --locked --extra dev --extra ui
+  PASS — Streamlit 1.41.1 import verified
+
+uv sync --locked --no-dev
+  PASS — exact Dockerfile dependency command
+
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/unit/test_opendart_source.py \
+  tests/unit/test_opendart_production.py
+  53 passed in 0.60s
+
+PYTHONPATH=src .venv/bin/pytest -q
+  2073 passed, 5 skipped in 4.60s
+
+python3 -m compileall -q src tests
+  PASS
+
+git diff --check
+  PASS
+```
+
+The pre-existing locked-install failures are therefore resolved. API fields, source selection, financial arithmetic, correction lineage, model configuration, and runtime behavior are unchanged.
+
 ## Appendix A. Mandatory Senior-Level Questions
 
 ### Architecture
